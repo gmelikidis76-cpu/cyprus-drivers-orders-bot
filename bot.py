@@ -19,60 +19,47 @@ from telegram.ext import (
 )
 
 
-# ============================================================
-# НАСТРОЙКИ
-# ============================================================
-
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Группа «Κούρσες δωρεάν»
 GROUP_ID = -1004449292276
 
-# Постоянная кнопка внизу Telegram
 NEW_ORDER_BUTTON = "🚕 Νέα διαδρομή"
 
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# ДАННЫЕ
-# ============================================================
-
-# user_id -> message_id сообщения:
-# "Αναμονή πληροφοριών από..."
+# user_id -> message_id сообщения ожидания
 waiting_for_order = {}
 
-# order_id -> данные заказа
+# Заказы
 orders = {}
 
 next_order_id = 1
 
-# Защита от ситуации, когда два человека одновременно
-# нажимают "взять" один заказ
 accept_lock = asyncio.Lock()
 
 
-# ============================================================
-# ПОСТОЯННАЯ КЛАВИАТУРА
-# ============================================================
+# =========================================================
+# ПОСТОЯННАЯ КНОПКА
+# =========================================================
 
 def main_keyboard():
     return ReplyKeyboardMarkup(
         [[NEW_ORDER_BUTTON]],
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder="Γράψε μήνυμα...",
+        input_field_placeholder="Νέα διαδρομή...",
     )
 
 
-# ============================================================
+# =========================================================
 # /START
-# ============================================================
+# =========================================================
 
 async def start(
     update: Update,
@@ -81,27 +68,47 @@ async def start(
     if not update.message:
         return
 
-    # Если /start отправлен в нашей группе
+    # В группе
     if update.effective_chat.id == GROUP_ID:
 
-        await update.message.reply_text(
-            "🚕 Το σύστημα διαδρομών είναι έτοιμο.",
+        # Отправляем служебное сообщение,
+        # чтобы Telegram установил клавиатуру
+        bot_message = await context.bot.send_message(
+            chat_id=GROUP_ID,
+            text="🚕 Έτοιμο.",
             reply_markup=main_keyboard(),
         )
 
+        # Удаляем /start водителя
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        # Небольшая пауза нужна, чтобы Telegram
+        # успел показать клавиатуру
+        await asyncio.sleep(1)
+
+        # Удаляем и сообщение "Έτοιμο."
+        # Кнопка внизу при этом остаётся
+        try:
+            await bot_message.delete()
+        except Exception:
+            pass
+
         return
 
-    # Если /start отправлен лично боту
+    # В личном чате
     await update.message.reply_text(
         "🚕 Cyprus Drivers Order\n\n"
-        "Χρησιμοποίησε την ομάδα «Κούρσες δωρεάν» "
-        "για τις διαδρομές."
+        "Οι διαδρομές δίνονται μέσα από την ομάδα "
+        "«Κούρσες δωρεάν»."
     )
 
 
-# ============================================================
+# =========================================================
 # СООБЩЕНИЯ В ГРУППЕ
-# ============================================================
+# =========================================================
 
 async def group_message(
     update: Update,
@@ -114,7 +121,6 @@ async def group_message(
     if not message:
         return
 
-    # Работаем ТОЛЬКО в нужной группе
     if update.effective_chat.id != GROUP_ID:
         return
 
@@ -123,30 +129,24 @@ async def group_message(
     if not user or user.is_bot:
         return
 
-    text = message.text
-
-    if not text:
-        return
+    text = message.text or ""
 
 
-    # ========================================================
-    # 1. ВОДИТЕЛЬ НАЖАЛ "Νέα διαδρομή"
-    # ========================================================
+    # =====================================================
+    # НАЖАЛИ "НОВЫЙ ЗАКАЗ"
+    # =====================================================
 
     if text == NEW_ORDER_BUTTON:
 
-        # Telegram сам отправляет текст Reply-кнопки в чат.
-        # Сразу удаляем его.
+        # Удаляем сообщение "🚕 Νέα διαδρομή",
+        # которое Telegram отправляет в группу
         try:
             await message.delete()
-        except Exception as e:
-            logger.warning(
-                "Could not delete NEW ORDER button message: %s",
-                e,
-            )
+        except Exception:
+            pass
 
-        # Если этот водитель уже начал другой заказ,
-        # удаляем старое сообщение ожидания.
+        # Если водитель уже начинал заказ,
+        # удаляем его старое ожидание
         old_waiting_id = waiting_for_order.pop(
             user.id,
             None,
@@ -161,10 +161,13 @@ async def group_message(
             except Exception:
                 pass
 
-        # Имя берём автоматически из Telegram
-        driver_name = user.first_name or user.full_name
+        driver_name = (
+            user.first_name
+            or user.full_name
+            or "οδηγό"
+        )
 
-        # Теперь появляется ТОЛЬКО это сообщение
+        # Промежуточное сообщение
         waiting_message = await context.bot.send_message(
             chat_id=GROUP_ID,
             text=(
@@ -180,52 +183,80 @@ async def group_message(
         return
 
 
-    # ========================================================
-    # 2. ЕСЛИ ВОДИТЕЛЬ НЕ СОЗДАЁТ ЗАКАЗ —
-    #    ЭТО ОБЫЧНАЯ ПЕРЕПИСКА
-    # ========================================================
+    # =====================================================
+    # ВОДИТЕЛЬ НЕ НАЖИМАЛ "НОВЫЙ ЗАКАЗ"
+    # =====================================================
 
     if user.id not in waiting_for_order:
+
+        # Любое обычное сообщение удаляем
+        try:
+            await message.delete()
+        except Exception as e:
+            logger.warning(
+                "Δεν ήταν δυνατή η διαγραφή μηνύματος: %s",
+                e,
+            )
+
         return
 
 
-    # ========================================================
-    # 3. ВОДИТЕЛЬ НАПИСАЛ ТЕКСТ ЗАКАЗА
-    # ========================================================
+    # =====================================================
+    # ВОДИТЕЛЬ ПИШЕТ СВОЙ ЗАКАЗ
+    # =====================================================
 
     waiting_message_id = waiting_for_order.pop(
         user.id
     )
 
-    order_text = text
-    creator_name = user.full_name
+    order_text = text.strip()
 
-    # Удаляем написанный водителем исходный текст.
-    # Потом он появится в красивом сообщении заказа.
-    try:
-        await message.delete()
-    except Exception as e:
-        logger.warning(
-            "Could not delete original order message: %s",
-            e,
+    # Если вместо текста отправили что-то другое
+    if not order_text:
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        # Оставляем водителя в режиме ожидания
+        waiting_for_order[user.id] = (
+            waiting_message_id
         )
 
-    # Удаляем промежуточное:
+        return
+
+
+    # Удаляем исходный текст водителя
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+    # Удаляем:
     # "Αναμονή πληροφοριών από..."
     try:
         await context.bot.delete_message(
             chat_id=GROUP_ID,
             message_id=waiting_message_id,
         )
-    except Exception as e:
-        logger.warning(
-            "Could not delete waiting message: %s",
-            e,
-        )
+    except Exception:
+        pass
 
-    # Создаём новый заказ
+
+    # =====================================================
+    # СОЗДАЁМ ГОТОВЫЙ ЗАКАЗ
+    # =====================================================
+
     order_id = next_order_id
     next_order_id += 1
+
+    creator_name = (
+        user.full_name
+        or user.first_name
+        or "Οδηγός"
+    )
 
     orders[order_id] = {
         "creator_id": user.id,
@@ -235,7 +266,6 @@ async def group_message(
         "accepted_by": None,
     }
 
-    # Синяя кнопка под готовым заказом
     accept_keyboard = InlineKeyboardMarkup(
         [
             [
@@ -247,7 +277,6 @@ async def group_message(
         ]
     )
 
-    # В группе остаётся только этот полноценный заказ
     await context.bot.send_message(
         chat_id=GROUP_ID,
         text=(
@@ -259,9 +288,9 @@ async def group_message(
     )
 
 
-# ============================================================
+# =========================================================
 # ВЗЯТЬ ЗАКАЗ
-# ============================================================
+# =========================================================
 
 async def take_order(
     update: Update,
@@ -278,45 +307,56 @@ async def take_order(
         order_id = int(
             query.data.split(":")[1]
         )
-    except (ValueError, IndexError, AttributeError):
+    except Exception:
         await query.answer()
         return
+
 
     async with accept_lock:
 
         order = orders.get(order_id)
 
-        # Заказ отсутствует
         if not order:
+
             await query.answer(
                 "Η διαδρομή δεν είναι πλέον διαθέσιμη.",
                 show_alert=True,
             )
+
             return
 
-        # Автор не может взять свой заказ
+
+        # Нельзя взять собственный заказ
         if user.id == order["creator_id"]:
+
             await query.answer(
                 "Δεν μπορείς να πάρεις τη δική σου διαδρομή.",
                 show_alert=True,
             )
+
             return
 
-        # Уже кто-то взял
+
+        # Заказ уже взяли
         if order["status"] != "open":
+
             await query.answer(
                 "Η διαδρομή έχει ήδη δοθεί.",
                 show_alert=True,
             )
+
             return
 
-        # Первый нажавший получает заказ
+
+        # Первый водитель получает заказ
         order["status"] = "accepted"
         order["accepted_by"] = user.id
+
 
     await query.answer(
         "Η διαδρομή είναι δική σου! ✅"
     )
+
 
     username = (
         f"@{user.username}"
@@ -324,10 +364,17 @@ async def take_order(
         else ""
     )
 
-    accepted_driver = user.full_name
+    accepted_driver = (
+        user.full_name
+        or user.first_name
+        or "Οδηγός"
+    )
 
-    # Меняем ТО ЖЕ сообщение.
-    # Синяя кнопка исчезает.
+
+    # =====================================================
+    # ОБНОВЛЯЕМ ЗАКАЗ
+    # =====================================================
+
     await query.edit_message_text(
         text=(
             "✅ Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ\n\n"
@@ -342,10 +389,13 @@ async def take_order(
         )
     )
 
-    # Пытаемся уведомить автора лично.
-    # Telegram разрешит это, если автор раньше
-    # открывал личный чат с ботом.
+
+    # =====================================================
+    # УВЕДОМЛЯЕМ АВТОРА ЛИЧНО
+    # =====================================================
+
     try:
+
         await context.bot.send_message(
             chat_id=order["creator_id"],
             text=(
@@ -358,13 +408,40 @@ async def take_order(
                 )
             ),
         )
+
     except Exception:
         pass
 
 
-# ============================================================
+# =========================================================
+# УДАЛЯЕМ ВСЁ ОСТАЛЬНОЕ ИЗ ГРУППЫ
+# =========================================================
+
+async def delete_other_messages(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    message = update.message
+
+    if not message:
+        return
+
+    if update.effective_chat.id != GROUP_ID:
+        return
+
+    # Сообщения самого бота не трогаем
+    if update.effective_user and update.effective_user.is_bot:
+        return
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+# =========================================================
 # ОШИБКИ
-# ============================================================
+# =========================================================
 
 async def error_handler(
     update: object,
@@ -376,9 +453,9 @@ async def error_handler(
     )
 
 
-# ============================================================
+# =========================================================
 # ЗАПУСК
-# ============================================================
+# =========================================================
 
 def main():
 
@@ -393,6 +470,7 @@ def main():
         .build()
     )
 
+    # /start
     app.add_handler(
         CommandHandler(
             "start",
@@ -400,6 +478,7 @@ def main():
         )
     )
 
+    # Кнопка "взять заказ"
     app.add_handler(
         CallbackQueryHandler(
             take_order,
@@ -407,12 +486,24 @@ def main():
         )
     )
 
+    # Текстовые сообщения
     app.add_handler(
         MessageHandler(
             filters.Chat(GROUP_ID)
             & filters.TEXT
             & ~filters.COMMAND,
             group_message,
+        )
+    )
+
+    # Фото, видео, стикеры, голосовые и т.д.
+    # тоже удаляем из рабочей группы
+    app.add_handler(
+        MessageHandler(
+            filters.Chat(GROUP_ID)
+            & ~filters.TEXT
+            & ~filters.COMMAND,
+            delete_other_messages,
         )
     )
 
