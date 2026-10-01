@@ -3,6 +3,8 @@ import sqlite3
 import logging
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatMemberStatus
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -13,6 +15,10 @@ from telegram.ext import (
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
+
+# Ваша закрытая группа таксистов
+ALLOWED_GROUP_ID = -1004449292276
+
 DB_FILE = "taxi_bot.db"
 
 logging.basicConfig(
@@ -71,11 +77,49 @@ def get_driver_ids():
     return [row[0] for row in rows]
 
 
+async def is_group_member(bot, user_id):
+    try:
+        member = await bot.get_chat_member(
+            chat_id=ALLOWED_GROUP_ID,
+            user_id=user_id,
+        )
+
+        return member.status in (
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        )
+
+    except TelegramError:
+        logger.exception(
+            "Could not check group membership for %s",
+            user_id,
+        )
+        return False
+
+
+async def send_no_access(message):
+    await message.reply_text(
+        "⛔ Δεν έχεις πρόσβαση.\n\n"
+        "Η υπηρεσία είναι διαθέσιμη μόνο "
+        "για τα μέλη της ομάδας."
+    )
+
+
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
     user = update.effective_user
+
+    if not await is_group_member(
+        context.bot,
+        user.id,
+    ):
+        await send_no_access(
+            update.effective_message
+        )
+        return
 
     register_driver(user)
 
@@ -83,28 +127,17 @@ async def start(
         [
             InlineKeyboardButton(
                 "🚕 Δώσε διαδρομή",
-                callback_data="new_order"
+                callback_data="new_order",
             )
         ]
     ])
 
     await update.effective_message.reply_text(
         "Καλώς ήρθες στην ανταλλαγή διαδρομών 🚕\n\n"
-        "Έχεις εγγραφεί και θα λαμβάνεις νέες "
-        "διαδρομές από τους συναδέλφους.",
+        "Η πρόσβασή σου είναι ενεργή.\n"
+        "Θα λαμβάνεις νέες διαδρομές "
+        "από τους συναδέλφους.",
         reply_markup=keyboard,
-    )
-
-
-# Команда для получения ID Telegram-группы
-async def groupid(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    chat = update.effective_chat
-
-    await update.effective_message.reply_text(
-        f"GROUP ID: {chat.id}"
     )
 
 
@@ -113,13 +146,26 @@ async def button_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
     query = update.callback_query
+    user = query.from_user
+
     await query.answer()
+
+    if not await is_group_member(
+        context.bot,
+        user.id,
+    ):
+        await query.message.reply_text(
+            "⛔ Δεν έχεις πλέον πρόσβαση.\n\n"
+            "Πρέπει να είσαι μέλος της ομάδας."
+        )
+        return
 
     if query.data == "new_order":
         context.user_data["waiting_for_order"] = True
 
         await query.message.reply_text(
-            "Γράψε τα στοιχεία της διαδρομής σε ένα μήνυμα.\n\n"
+            "Γράψε τα στοιχεία της διαδρομής "
+            "σε ένα μήνυμα.\n\n"
             "Παράδειγμα:\n"
             "Λεμεσός → Αεροδρόμιο Λάρνακας\n"
             "Σήμερα 18:30\n"
@@ -135,13 +181,13 @@ async def button_handler(
         order_id = int(
             query.data.split("_", 1)[1]
         )
+
     except (ValueError, IndexError):
         await query.message.reply_text(
             "Παρουσιάστηκε σφάλμα με τη διαδρομή."
         )
         return
 
-    user = query.from_user
     conn = db_connect()
 
     try:
@@ -179,7 +225,8 @@ async def button_handler(
             conn.rollback()
 
             await query.answer(
-                "Δεν μπορείς να πάρεις τη δική σου διαδρομή.",
+                "Δεν μπορείς να πάρεις "
+                "τη δική σου διαδρομή.",
                 show_alert=True,
             )
             return
@@ -238,6 +285,7 @@ async def button_handler(
                 f"Telegram: {username}"
             ),
         )
+
     except Exception:
         logger.exception(
             "Could not notify order creator"
@@ -253,6 +301,21 @@ async def text_handler(
     ):
         return
 
+    user = update.effective_user
+
+    if not await is_group_member(
+        context.bot,
+        user.id,
+    ):
+        context.user_data[
+            "waiting_for_order"
+        ] = False
+
+        await send_no_access(
+            update.effective_message
+        )
+        return
+
     order_text = (
         update.effective_message.text or ""
     ).strip()
@@ -266,7 +329,6 @@ async def text_handler(
 
     context.user_data["waiting_for_order"] = False
 
-    user = update.effective_user
     register_driver(user)
 
     with db_connect() as conn:
@@ -296,7 +358,16 @@ async def text_handler(
     sent = 0
 
     for driver_id in get_driver_ids():
+
         if driver_id == user.id:
+            continue
+
+        # Перед каждой отправкой проверяем,
+        # что таксист всё ещё состоит в группе.
+        if not await is_group_member(
+            context.bot,
+            driver_id,
+        ):
             continue
 
         try:
@@ -318,7 +389,8 @@ async def text_handler(
             )
 
     await update.effective_message.reply_text(
-        "✅ Η διαδρομή στάλθηκε στους συναδέλφους.\n"
+        "✅ Η διαδρομή στάλθηκε "
+        "στους συναδέλφους.\n"
         f"Παραλήπτες: {sent}"
     )
 
@@ -329,7 +401,7 @@ async def error_handler(
 ):
     logger.error(
         "Unhandled error",
-        exc_info=context.error
+        exc_info=context.error,
     )
 
 
@@ -350,11 +422,6 @@ def main():
 
     app.add_handler(
         CommandHandler("start", start)
-    )
-
-    # ВАЖНО: обработчик команды /groupid
-    app.add_handler(
-        CommandHandler("groupid", groupid)
     )
 
     app.add_handler(
