@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import logging
 
 from telegram import (
@@ -19,22 +18,10 @@ from telegram.ext import (
 )
 
 
-# ==========================================
-# НАСТРОЙКИ
-# ==========================================
-
 TOKEN = os.getenv("BOT_TOKEN")
 
 # Группа «Κούρσες δωρεάν»
 GROUP_ID = -1004449292276
-
-# Если подключим Railway Volume к /data,
-# база будет храниться именно там.
-DATA_DIR = os.getenv("DATA_DIR", ".")
-
-os.makedirs(DATA_DIR, exist_ok=True)
-
-DB_PATH = os.path.join(DATA_DIR, "taxi_bot.db")
 
 NEW_ORDER_BUTTON = "🚕 Νέα διαδρομή"
 
@@ -45,44 +32,19 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Кто нажал «Новый заказ» и сейчас пишет его
-waiting_for_order = set()
+
+# Водители, которые сейчас создают заказ.
+# user_id -> message_id сообщения "ожидаем информацию"
+waiting_for_order = {}
+
+# Заказы
+orders = {}
+next_order_id = 1
 
 
-# ==========================================
-# БАЗА ДАННЫХ
-# ==========================================
-
-def get_db():
-    return sqlite3.connect(
-        DB_PATH,
-        timeout=30
-    )
-
-
-def init_db():
-    with get_db() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                creator_id INTEGER NOT NULL,
-                creator_name TEXT NOT NULL,
-                text TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'open',
-                accepted_by INTEGER,
-                accepted_name TEXT,
-                message_id INTEGER
-            )
-            """
-        )
-
-        conn.commit()
-
-
-# ==========================================
+# ==================================================
 # ПОСТОЯННАЯ КНОПКА
-# ==========================================
+# ==================================================
 
 def main_keyboard():
     return ReplyKeyboardMarkup(
@@ -93,9 +55,9 @@ def main_keyboard():
     )
 
 
-# ==========================================
+# ==================================================
 # /START
-# ==========================================
+# ==================================================
 
 async def start(
     update: Update,
@@ -104,15 +66,15 @@ async def start(
     if not update.message:
         return
 
-    # В нашей группе
     if update.effective_chat.id == GROUP_ID:
+
         await update.message.reply_text(
             "🚕 Το σύστημα διαδρομών είναι ενεργό.",
             reply_markup=main_keyboard(),
         )
+
         return
 
-    # В личном чате
     await update.message.reply_text(
         "🚕 Cyprus Drivers Orders\n\n"
         "Οι διαδρομές δίνονται μέσα από την ομάδα "
@@ -120,14 +82,16 @@ async def start(
     )
 
 
-# ==========================================
-# СООБЩЕНИЯ ГРУППЫ
-# ==========================================
+# ==================================================
+# СООБЩЕНИЯ В ГРУППЕ
+# ==================================================
 
 async def group_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+    global next_order_id
+
     if not update.message:
         return
 
@@ -144,57 +108,88 @@ async def group_message(
     if not text:
         return
 
-    # --------------------------------------
-    # Нажали постоянную кнопку
-    # --------------------------------------
+    # ==================================================
+    # ВОДИТЕЛЬ НАЖАЛ "НОВЫЙ ЗАКАЗ"
+    # ==================================================
 
     if text == NEW_ORDER_BUTTON:
 
-        waiting_for_order.add(user.id)
-
-        # Telegram отправляет текст кнопки как сообщение.
-        # Сразу удаляем его, чтобы чат оставался чистым.
+        # Telegram сначала отправляет текст кнопки в группу.
+        # Сразу его удаляем.
         try:
             await update.message.delete()
         except Exception:
             pass
 
+        # Если водитель уже начал создавать заказ,
+        # удаляем его старое сообщение ожидания.
+        old_waiting_message_id = waiting_for_order.get(user.id)
+
+        if old_waiting_message_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=GROUP_ID,
+                    message_id=old_waiting_message_id,
+                )
+            except Exception:
+                pass
+
+        # Бот показывает только короткое сообщение ожидания.
+        waiting_message = await context.bot.send_message(
+            chat_id=GROUP_ID,
+            text=(
+                "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ\n\n"
+                f"⏳ Αναμονή πληροφοριών από {user.first_name}..."
+            ),
+        )
+
+        # Запоминаем сообщение.
+        waiting_for_order[user.id] = waiting_message.message_id
+
         return
 
-    # --------------------------------------
-    # Обычная переписка
-    # --------------------------------------
+
+    # ==================================================
+    # ОБЫЧНОЕ СООБЩЕНИЕ
+    # ==================================================
 
     if user.id not in waiting_for_order:
         return
 
-    # --------------------------------------
-    # Это новый заказ
-    # --------------------------------------
 
-    waiting_for_order.discard(user.id)
+    # ==================================================
+    # ВОДИТЕЛЬ НАПИСАЛ ИНФОРМАЦИЮ О ЗАКАЗЕ
+    # ==================================================
 
-    # Сохраняем заказ в базе
-    with get_db() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO orders (
-                creator_id,
-                creator_name,
-                text,
-                status
-            )
-            VALUES (?, ?, ?, 'open')
-            """,
-            (
-                user.id,
-                user.full_name,
-                text,
-            ),
+    waiting_message_id = waiting_for_order.pop(user.id)
+
+    # Удаляем сообщение водителя с исходным текстом.
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Удаляем:
+    # "Αναμονή πληροφοριών από..."
+    try:
+        await context.bot.delete_message(
+            chat_id=GROUP_ID,
+            message_id=waiting_message_id,
         )
+    except Exception:
+        pass
 
-        order_id = cursor.lastrowid
-        conn.commit()
+    # Создаём заказ
+    order_id = next_order_id
+    next_order_id += 1
+
+    orders[order_id] = {
+        "creator_id": user.id,
+        "creator_name": user.full_name,
+        "text": text,
+        "accepted": False,
+        "accepted_by": None,
+    }
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -207,15 +202,8 @@ async def group_message(
         ]
     )
 
-    # Удаляем исходный текст водителя,
-    # чтобы заказ не дублировался.
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-    # Публикуем одно чистое сообщение заказа
-    sent_message = await context.bot.send_message(
+    # Теперь появляется только полноценный заказ.
+    await context.bot.send_message(
         chat_id=GROUP_ID,
         text=(
             "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ\n\n"
@@ -225,26 +213,10 @@ async def group_message(
         reply_markup=keyboard,
     )
 
-    # Запоминаем Telegram message_id
-    with get_db() as conn:
-        conn.execute(
-            """
-            UPDATE orders
-            SET message_id = ?
-            WHERE id = ?
-            """,
-            (
-                sent_message.message_id,
-                order_id,
-            ),
-        )
 
-        conn.commit()
-
-
-# ==========================================
+# ==================================================
 # ПРИНЯТЬ ЗАКАЗ
-# ==========================================
+# ==================================================
 
 async def accept_order(
     update: Update,
@@ -265,85 +237,41 @@ async def accept_order(
         await query.answer()
         return
 
-    # BEGIN IMMEDIATE нужен, чтобы два водителя
-    # не смогли одновременно забрать один заказ.
-    conn = get_db()
+    order = orders.get(order_id)
 
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    # Заказ не найден
+    if not order:
 
-        order = conn.execute(
-            """
-            SELECT
-                creator_id,
-                creator_name,
-                text,
-                status
-            FROM orders
-            WHERE id = ?
-            """,
-            (order_id,),
-        ).fetchone()
-
-        if not order:
-            conn.rollback()
-
-            await query.answer(
-                "Η διαδρομή δεν είναι πλέον διαθέσιμη.",
-                show_alert=True,
-            )
-            return
-
-        creator_id = order[0]
-        order_text = order[2]
-        status = order[3]
-
-        # Нельзя взять свой заказ
-        if user.id == creator_id:
-            conn.rollback()
-
-            await query.answer(
-                "Δεν μπορείς να πάρεις τη δική σου διαδρομή.",
-                show_alert=True,
-            )
-            return
-
-        # Уже забрали
-        if status != "open":
-            conn.rollback()
-
-            await query.answer(
-                "Η διαδρομή έχει ήδη δοθεί.",
-                show_alert=True,
-            )
-            return
-
-        # Закрепляем заказ за первым водителем
-        conn.execute(
-            """
-            UPDATE orders
-            SET
-                status = 'accepted',
-                accepted_by = ?,
-                accepted_name = ?
-            WHERE id = ?
-              AND status = 'open'
-            """,
-            (
-                user.id,
-                user.full_name,
-                order_id,
-            ),
+        await query.answer(
+            "Η διαδρομή δεν είναι πλέον διαθέσιμη.",
+            show_alert=True,
         )
 
-        conn.commit()
+        return
 
-    except Exception:
-        conn.rollback()
-        raise
+    # Нельзя взять собственный заказ
+    if user.id == order["creator_id"]:
 
-    finally:
-        conn.close()
+        await query.answer(
+            "Δεν μπορείς να πάρεις τη δική σου διαδρομή.",
+            show_alert=True,
+        )
+
+        return
+
+    # Заказ уже забрали
+    if order["accepted"]:
+
+        await query.answer(
+            "Η διαδρομή έχει ήδη δοθεί.",
+            show_alert=True,
+        )
+
+        return
+
+    # Первый водитель забирает заказ
+    order["accepted"] = True
+    order["accepted_by"] = user.id
 
     await query.answer(
         "Η διαδρομή είναι δική σου! ✅"
@@ -355,12 +283,12 @@ async def accept_order(
         else ""
     )
 
-    # То же сообщение меняется,
-    # а кнопка «принять» исчезает.
+    # Меняем готовый заказ.
+    # Кнопка исчезает.
     await query.edit_message_text(
         text=(
             "✅ Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ\n\n"
-            f"{order_text}\n\n"
+            f"{order['text']}\n\n"
             f"🚕 Την πήρε: {user.full_name}"
             + (
                 f" ({username})"
@@ -370,11 +298,11 @@ async def accept_order(
         )
     )
 
-    # Личное уведомление автору,
-    # если он раньше открывал чат с ботом.
+    # Пробуем сообщить автору заказа лично.
     try:
+
         await context.bot.send_message(
-            chat_id=creator_id,
+            chat_id=order["creator_id"],
             text=(
                 "✅ Η διαδρομή σου δόθηκε.\n\n"
                 f"🚕 Οδηγός: {user.full_name}"
@@ -385,13 +313,14 @@ async def accept_order(
                 )
             ),
         )
+
     except Exception:
         pass
 
 
-# ==========================================
+# ==================================================
 # ОШИБКИ
-# ==========================================
+# ==================================================
 
 async def error_handler(
     update: object,
@@ -403,23 +332,14 @@ async def error_handler(
     )
 
 
-# ==========================================
+# ==================================================
 # ЗАПУСК
-# ==========================================
+# ==================================================
 
 def main():
 
     if not TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN is not set"
-        )
-
-    init_db()
-
-    logger.info(
-        "Database: %s",
-        DB_PATH,
-    )
+        raise RuntimeError("BOT_TOKEN is not set")
 
     app = (
         Application.builder()
