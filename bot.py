@@ -22,7 +22,7 @@ from telegram.ext import (
 
 
 # =========================================================
-# SETTINGS
+# ΡΥΘΜΙΣΕΙΣ
 # =========================================================
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -40,20 +40,31 @@ logger = logging.getLogger(__name__)
 
 db_lock = asyncio.Lock()
 
-# Only temporary conversation steps are stored here.
-# Orders themselves are permanently stored in SQLite.
+# Μόνο προσωρινά βήματα συνομιλίας.
+# Οι διαδρομές αποθηκεύονται μόνιμα στη βάση.
 user_state = {}
 
 
 # =========================================================
-# BUTTON TEXT
+# ΚΟΥΜΠΙΑ
 # =========================================================
 
-BTN_NEW_DRIVER = "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ"
+BTN_NEW_DRIVER = "🚕 ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ"
+BTN_MY_ORDERS = "📋 ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ"
+BTN_TAKEN = "📦 ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ"
+BTN_CANCEL = "❌ ΑΚΥΡΩΣΗ"
+
+# Client button
 BTN_NEW_CLIENT = "🚕 REQUEST A TAXI"
-BTN_MY_ORDERS = "📋 MY ORDERS"
-BTN_TAKEN = "📦 MY TAKEN ORDERS"
-BTN_CANCEL = "❌ CANCEL"
+
+# Παλιές ονομασίες για να συνεχίσουν να λειτουργούν
+# παλιά πληκτρολόγια μέχρι να ανανεωθούν.
+OLD_NEW_DRIVER = "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ"
+OLD_MY_ORDER = "📋 MY ORDER"
+OLD_MY_ORDERS = "📋 MY ORDERS"
+OLD_TAKEN = "📦 MY TAKEN ORDER"
+OLD_TAKEN_ORDERS = "📦 MY TAKEN ORDERS"
+OLD_CANCEL = "❌ CANCEL"
 
 
 # =========================================================
@@ -215,7 +226,7 @@ async def role_for(user_id, context):
 
 
 # =========================================================
-# PRIVATE CHAT KEYBOARDS
+# ΠΛΗΚΤΡΟΛΟΓΙΟ ΠΡΟΣΩΠΙΚΟΥ BOT
 # =========================================================
 
 def main_keyboard(role):
@@ -223,10 +234,8 @@ def main_keyboard(role):
         return ReplyKeyboardMarkup(
             [
                 [BTN_NEW_DRIVER],
-                [
-                    BTN_MY_ORDERS,
-                    BTN_TAKEN,
-                ],
+                [BTN_MY_ORDERS],
+                [BTN_TAKEN],
             ],
             resize_keyboard=True,
             is_persistent=True,
@@ -251,7 +260,7 @@ def cancel_keyboard():
 
 
 # =========================================================
-# BIG GROUP BUTTON
+# ΠΑΝΕΛ ΟΜΑΔΑΣ
 # =========================================================
 
 def driver_panel_keyboard():
@@ -259,7 +268,7 @@ def driver_panel_keyboard():
         [
             [
                 InlineKeyboardButton(
-                    "🚕🚕  ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ  🚕🚕",
+                    "🚕🚕 ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ 🚕🚕",
                     url=(
                         f"https://t.me/{BOT_USERNAME}"
                         "?start=driver"
@@ -271,7 +280,7 @@ def driver_panel_keyboard():
 
 
 # =========================================================
-# ORDER BUTTONS
+# ΚΟΥΜΠΙΑ ΔΙΑΔΡΟΜΗΣ
 # =========================================================
 
 def open_order_keyboard(order_id):
@@ -291,7 +300,7 @@ def creator_manage_keyboard(order):
     rows = [
         [
             InlineKeyboardButton(
-                "✏️ EDIT DETAILS",
+                "✏️ ΑΛΛΑΓΗ ΣΤΟΙΧΕΙΩΝ",
                 callback_data=f"edit_details:{order['id']}",
             )
         ]
@@ -301,7 +310,7 @@ def creator_manage_keyboard(order):
         rows.append(
             [
                 InlineKeyboardButton(
-                    "💶 CHANGE PRICE",
+                    "💶 ΑΛΛΑΓΗ ΤΙΜΗΣ",
                     callback_data=f"edit_price:{order['id']}",
                 )
             ]
@@ -310,7 +319,7 @@ def creator_manage_keyboard(order):
     rows.append(
         [
             InlineKeyboardButton(
-                "❌ CANCEL ORDER",
+                "❌ ΑΚΥΡΩΣΗ ΔΙΑΔΡΟΜΗΣ",
                 callback_data=f"cancel_order:{order['id']}",
             )
         ]
@@ -321,9 +330,9 @@ def creator_manage_keyboard(order):
 
 def accepted_driver_keyboard(order):
     if order["creator_role"] == "client":
-        contact_label = "💬 CONTACT CUSTOMER"
+        contact_label = "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΠΕΛΑΤΗ"
     else:
-        contact_label = "💬 CONTACT CREATOR"
+        contact_label = "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΟΔΗΓΟ"
 
     return InlineKeyboardMarkup(
         [
@@ -338,7 +347,7 @@ def accepted_driver_keyboard(order):
             ],
             [
                 InlineKeyboardButton(
-                    "↩️ GIVE UP ORDER",
+                    "↩️ ΑΦΗΣΕ ΤΗ ΔΙΑΔΡΟΜΗ",
                     callback_data=f"giveup:{order['id']}",
                 )
             ],
@@ -353,7 +362,7 @@ def accepted_creator_keyboard(order):
         rows.append(
             [
                 InlineKeyboardButton(
-                    "💬 CONTACT DRIVER",
+                    "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΟΔΗΓΟ",
                     url=contact_url(
                         order["taker_id"],
                         order["taker_username"],
@@ -365,7 +374,7 @@ def accepted_creator_keyboard(order):
     rows.append(
         [
             InlineKeyboardButton(
-                "✏️ EDIT DETAILS",
+                "✏️ ΑΛΛΑΓΗ ΣΤΟΙΧΕΙΩΝ",
                 callback_data=f"edit_details:{order['id']}",
             )
         ]
@@ -375,7 +384,7 @@ def accepted_creator_keyboard(order):
         rows.append(
             [
                 InlineKeyboardButton(
-                    "💶 CHANGE PRICE",
+                    "💶 ΑΛΛΑΓΗ ΤΙΜΗΣ",
                     callback_data=f"edit_price:{order['id']}",
                 )
             ]
@@ -384,7 +393,7 @@ def accepted_creator_keyboard(order):
     rows.append(
         [
             InlineKeyboardButton(
-                "❌ CANCEL ORDER",
+                "❌ ΑΚΥΡΩΣΗ ΔΙΑΔΡΟΜΗΣ",
                 callback_data=f"cancel_order:{order['id']}",
             )
         ]
@@ -398,14 +407,16 @@ def confirm_cancel_keyboard(order_id):
         [
             [
                 InlineKeyboardButton(
-                    "✅ YES, CANCEL",
+                    "✅ ΝΑΙ, ΑΚΥΡΩΣΗ",
                     callback_data=f"confirm_cancel:{order_id}",
-                ),
+                )
+            ],
+            [
                 InlineKeyboardButton(
-                    "↩️ BACK",
+                    "⬅️ ΠΙΣΩ",
                     callback_data=f"manage:{order_id}",
-                ),
-            ]
+                )
+            ],
         ]
     )
 
@@ -415,20 +426,22 @@ def confirm_giveup_keyboard(order_id):
         [
             [
                 InlineKeyboardButton(
-                    "✅ YES, GIVE UP",
+                    "✅ ΝΑΙ, ΑΦΗΣΕ ΤΗ",
                     callback_data=f"confirm_giveup:{order_id}",
-                ),
+                )
+            ],
+            [
                 InlineKeyboardButton(
-                    "↩️ BACK",
+                    "⬅️ ΠΙΣΩ",
                     callback_data=f"taken:{order_id}",
-                ),
-            ]
+                )
+            ],
         ]
     )
 
 
 # =========================================================
-# ORDER CARD
+# ΚΑΡΤΑ ΔΙΑΔΡΟΜΗΣ
 # =========================================================
 
 def order_card(order):
@@ -448,13 +461,12 @@ def order_card(order):
                 f"€{html.escape(order['price'])}"
             )
         else:
-            price_line = "🤝 Negotiable"
+            price_line = "🤝 Συζητήσιμη"
 
         text = (
             "🚕 <b>ΝΕΑ ΔΙΑΔΡΟΜΗ — ΠΕΛΑΤΗΣ</b>\n\n"
             f"{details}\n\n"
-            f"💶 Προσφορά πελάτη: "
-            f"<b>{price_line}</b>\n"
+            f"💶 Προσφορά: <b>{price_line}</b>\n"
             f"👤 Πελάτης: {creator}\n"
             f"🔢 Αριθμός: #{order_id}"
         )
@@ -481,14 +493,15 @@ def order_card(order):
     elif order["status"] == "cancelled":
         text += (
             "\n\n"
-            "❌ <b>ΑΚΥΡΩΘΗΚΕ</b>"
+            "❌ <b>Η ΔΙΑΔΡΟΜΗ ΑΚΥΡΩΘΗΚΕ</b>"
         )
 
     return text
 
 
 # =========================================================
-# UPDATE EXISTING GROUP CARD
+# ΑΝΑΝΕΩΣΗ ΥΠΑΡΧΟΥΣΑΣ ΚΑΡΤΑΣ
+# ΧΩΡΙΣ ΝΕΟ ΜΗΝΥΜΑ ΣΤΗΝ ΟΜΑΔΑ
 # =========================================================
 
 async def refresh_group_card(
@@ -526,7 +539,7 @@ async def refresh_group_card(
 
 
 # =========================================================
-# CREATE ORDER
+# ΔΗΜΙΟΥΡΓΙΑ ΝΕΑΣ ΔΙΑΔΡΟΜΗΣ
 # =========================================================
 
 async def create_order(
@@ -572,12 +585,18 @@ async def create_order(
         order_id
     )
 
-    # IMPORTANT:
-    # This is the ONLY new message sent to the drivers group
-    # when an order is created.
+    # =====================================================
+    # ΠΟΛΥ ΣΗΜΑΝΤΙΚΟ:
     #
-    # It is the completed order and it is sent with
-    # normal Telegram notification enabled.
+    # ΜΟΝΟ ΕΔΩ δημιουργείται ΝΕΟ μήνυμα στην ομάδα οδηγών.
+    #
+    # Δηλαδή:
+    # ολοκληρωμένη νέα διαδρομή = 1 νέο μήνυμα = 1 ειδοποίηση.
+    #
+    # Όλες οι άλλες ενέργειες γίνονται ιδιωτικά
+    # ή με edit της ίδιας κάρτας.
+    # =====================================================
+
     message = await context.bot.send_message(
         chat_id=DRIVERS_GROUP_ID,
         text=order_card(order),
@@ -610,7 +629,7 @@ async def create_order(
 
 
 # =========================================================
-# BEGIN NEW ORDER
+# ΝΕΑ ΔΙΑΔΡΟΜΗ
 # =========================================================
 
 async def begin_new_order(
@@ -620,11 +639,7 @@ async def begin_new_order(
 ):
     user = update.effective_user
 
-    # IMPORTANT:
-    # We DO NOT block the user if they already have
-    # another active order.
-    #
-    # One driver/client can create multiple orders.
+    # Επιτρέπονται πολλές ενεργές διαδρομές.
     user_state[user.id] = {
         "action": "new_details",
         "role": role,
@@ -632,20 +647,20 @@ async def begin_new_order(
 
     if role == "driver":
         text = (
-            "🚕 <b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>\n\n"
-            "Γράψε όλα τα στοιχεία της διαδρομής "
-            "σε ΕΝΑ μήνυμα.\n\n"
-            "Παράδειγμα:\n"
+            "🚕 <b>ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ</b>\n\n"
+            "Γράψε όλα τα στοιχεία σε ΕΝΑ μήνυμα.\n\n"
+            "Παράδειγμα:\n\n"
             "Larnaca Airport → Limassol\n"
             "23:00\n"
-            "2 passengers\n"
-            "€70"
+            "2 άτομα\n"
+            "€70\n\n"
+            "👇 Στείλε τώρα τα στοιχεία."
         )
 
     else:
         text = (
             "🚕 <b>REQUEST A TAXI</b>\n\n"
-            "Send your trip details "
+            "Send all trip details "
             "in ONE message.\n\n"
             "Example:\n"
             "Larnaca Airport → Limassol\n"
@@ -681,7 +696,6 @@ async def start(
             await update.effective_message.delete()
         except Exception:
             pass
-
         return
 
     payload = ""
@@ -701,8 +715,9 @@ async def start(
 
         if not allowed:
             await update.message.reply_text(
-                "⛔ Driver access is available "
-                "only to members of the drivers group."
+                "⛔ Η λειτουργία αυτή είναι "
+                "μόνο για οδηγούς.",
+                disable_notification=True,
             )
             return
 
@@ -743,11 +758,13 @@ async def start(
 
     if role == "driver":
         text = (
-            "🚕 <b>DRIVER MENU</b>\n\n"
-            "To give a trip to another driver, "
-            "tap <b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>.\n\n"
-            "You can create several active "
-            "trips at the same time."
+            "🚕 <b>ΜΕΝΟΥ ΟΔΗΓΟΥ</b>\n\n"
+            "Θέλεις να δώσεις μια διαδρομή "
+            "σε άλλον οδηγό;\n\n"
+            "👇 Πάτησε:\n"
+            "<b>🚕 ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ</b>\n\n"
+            "Μπορείς να δώσεις όσες "
+            "διαδρομές θέλεις."
         )
 
     else:
@@ -779,10 +796,7 @@ async def panel_command(
     if not update.effective_chat:
         return
 
-    if (
-        update.effective_chat.id
-        != DRIVERS_GROUP_ID
-    ):
+    if update.effective_chat.id != DRIVERS_GROUP_ID:
         return
 
     if not await is_admin(
@@ -793,7 +807,6 @@ async def panel_command(
             await update.effective_message.delete()
         except Exception:
             pass
-
         return
 
     try:
@@ -804,13 +817,9 @@ async def panel_command(
     panel = await context.bot.send_message(
         chat_id=DRIVERS_GROUP_ID,
         text=(
-            "🚕🚕🚕 "
-            "<b>ΟΔΗΓΟΙ — ΝΕΑ ΔΙΑΔΡΟΜΗ</b> "
-            "🚕🚕🚕\n\n"
-            "Θέλεις να δώσεις μια νέα διαδρομή "
-            "σε άλλον οδηγό;\n\n"
-            "👇 <b>ΠΑΤΗΣΕ ΤΟ ΜΕΓΑΛΟ ΚΟΥΜΠΙ "
-            "ΠΑΡΑΚΑΤΩ</b> 👇"
+            "🚕 <b>ΘΕΛΕΙΣ ΝΑ ΔΩΣΕΙΣ "
+            "ΝΕΑ ΔΙΑΔΡΟΜΗ;</b>\n\n"
+            "👇 Πάτησε το κουμπί παρακάτω."
         ),
         parse_mode="HTML",
         reply_markup=driver_panel_keyboard(),
@@ -825,7 +834,7 @@ async def panel_command(
         )
     except Exception:
         logger.exception(
-            "Could not automatically pin driver panel"
+            "Could not pin panel"
         )
 
 
@@ -839,13 +848,12 @@ async def id_command(
 ):
     if update.effective_chat:
         await update.effective_message.reply_text(
-            f"Chat ID: "
-            f"{update.effective_chat.id}"
+            f"Chat ID: {update.effective_chat.id}"
         )
 
 
 # =========================================================
-# MY ORDERS LIST
+# ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ
 # =========================================================
 
 async def show_my_orders(
@@ -859,8 +867,17 @@ async def show_my_orders(
     )
 
     if not orders:
+        text = (
+            "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
+            "Δεν έχεις ενεργές διαδρομές."
+            if role == "driver"
+            else
+            "📋 You have no active orders."
+        )
+
         await update.message.reply_text(
-            "📋 You have no active orders.",
+            text,
+            parse_mode="HTML",
             reply_markup=main_keyboard(role),
             disable_notification=True,
         )
@@ -869,10 +886,11 @@ async def show_my_orders(
     buttons = []
 
     for order in orders:
-        if order["status"] == "taken":
-            status = "✅"
-        else:
-            status = "🟢"
+        status = (
+            "✅"
+            if order["status"] == "taken"
+            else "🟢"
+        )
 
         short_details = (
             order["details"]
@@ -880,9 +898,9 @@ async def show_my_orders(
             .strip()
         )
 
-        if len(short_details) > 28:
+        if len(short_details) > 30:
             short_details = (
-                short_details[:28] + "…"
+                short_details[:30] + "…"
             )
 
         buttons.append(
@@ -897,10 +915,18 @@ async def show_my_orders(
             ]
         )
 
-    await update.message.reply_text(
+    text = (
+        "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
+        "👇 Διάλεξε τη διαδρομή "
+        "που θέλεις:"
+        if role == "driver"
+        else
         "📋 <b>MY ORDERS</b>\n\n"
-        "Choose the order you want "
-        "to manage:",
+        "Choose an order:"
+    )
+
+    await update.message.reply_text(
+        text,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             buttons
@@ -910,7 +936,7 @@ async def show_my_orders(
 
 
 # =========================================================
-# TAKEN ORDERS LIST
+# ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ
 # =========================================================
 
 async def show_taken_orders(
@@ -924,7 +950,10 @@ async def show_taken_orders(
 
     if not orders:
         await update.message.reply_text(
-            "📦 You have no accepted orders.",
+            "📦 <b>ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ</b>\n\n"
+            "Δεν έχεις πάρει κάποια "
+            "ενεργή διαδρομή.",
+            parse_mode="HTML",
             reply_markup=main_keyboard(
                 "driver"
             ),
@@ -941,9 +970,9 @@ async def show_taken_orders(
             .strip()
         )
 
-        if len(short_details) > 28:
+        if len(short_details) > 30:
             short_details = (
-                short_details[:28] + "…"
+                short_details[:30] + "…"
             )
 
         buttons.append(
@@ -959,8 +988,8 @@ async def show_taken_orders(
         )
 
     await update.message.reply_text(
-        "📦 <b>MY TAKEN ORDERS</b>\n\n"
-        "Choose an order:",
+        "📦 <b>ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ</b>\n\n"
+        "👇 Διάλεξε διαδρομή:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             buttons
@@ -995,31 +1024,44 @@ async def private_text(
         context,
     )
 
-    if text == BTN_CANCEL:
+    # -----------------------------------------------------
+    # CANCEL CURRENT STEP
+    # -----------------------------------------------------
+
+    if text in (
+        BTN_CANCEL,
+        OLD_CANCEL,
+    ):
         user_state.pop(
             user.id,
             None,
         )
 
+        msg = (
+            "↩️ Ακυρώθηκε."
+            if role == "driver"
+            else
+            "↩️ Cancelled."
+        )
+
         await update.message.reply_text(
-            "↩️ Cancelled.",
+            msg,
             reply_markup=main_keyboard(role),
             disable_notification=True,
         )
         return
 
-    if text == BTN_NEW_CLIENT:
-        await begin_new_order(
-            update,
-            context,
-            "client",
-        )
-        return
+    # -----------------------------------------------------
+    # NEW DRIVER ORDER
+    # -----------------------------------------------------
 
-    if text == BTN_NEW_DRIVER:
+    if text in (
+        BTN_NEW_DRIVER,
+        OLD_NEW_DRIVER,
+    ):
         if role != "driver":
             await update.message.reply_text(
-                "⛔ Driver access only.",
+                "⛔ Μόνο για οδηγούς.",
                 disable_notification=True,
             )
             return
@@ -1031,7 +1073,27 @@ async def private_text(
         )
         return
 
-    if text == BTN_MY_ORDERS:
+    # -----------------------------------------------------
+    # NEW CLIENT ORDER
+    # -----------------------------------------------------
+
+    if text == BTN_NEW_CLIENT:
+        await begin_new_order(
+            update,
+            context,
+            "client",
+        )
+        return
+
+    # -----------------------------------------------------
+    # MY ORDERS
+    # -----------------------------------------------------
+
+    if text in (
+        BTN_MY_ORDERS,
+        OLD_MY_ORDER,
+        OLD_MY_ORDERS,
+    ):
         await show_my_orders(
             update,
             context,
@@ -1040,7 +1102,15 @@ async def private_text(
         )
         return
 
-    if text == BTN_TAKEN:
+    # -----------------------------------------------------
+    # TAKEN ORDERS
+    # -----------------------------------------------------
+
+    if text in (
+        BTN_TAKEN,
+        OLD_TAKEN,
+        OLD_TAKEN_ORDERS,
+    ):
         if role == "driver":
             await show_taken_orders(
                 update,
@@ -1054,8 +1124,15 @@ async def private_text(
     )
 
     if not state:
+        msg = (
+            "👇 Χρησιμοποίησε τα κουμπιά παρακάτω."
+            if role == "driver"
+            else
+            "Please use the buttons below."
+        )
+
         await update.message.reply_text(
-            "Please use the buttons below.",
+            msg,
             reply_markup=main_keyboard(role),
             disable_notification=True,
         )
@@ -1064,12 +1141,15 @@ async def private_text(
     action = state["action"]
 
     # =====================================================
-    # NEW ORDER DETAILS
+    # NEW DETAILS
     # =====================================================
 
     if action == "new_details":
         if len(text) < 3:
             await update.message.reply_text(
+                "Γράψε τα στοιχεία της διαδρομής."
+                if role == "driver"
+                else
                 "Please send the trip details.",
                 disable_notification=True,
             )
@@ -1083,19 +1163,17 @@ async def private_text(
             await update.message.reply_text(
                 "💶 <b>HOW MUCH ARE YOU "
                 "WILLING TO PAY?</b>\n\n"
-                "Send your offer in EUR.\n"
+                "Enter your offer in EUR.\n"
                 "Example: <b>50</b>\n\n"
                 "If you are not sure, "
-                "tap the button below.",
+                "tap below.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
                             InlineKeyboardButton(
                                 "🤝 SKIP / NOT SURE",
-                                callback_data=(
-                                    "skip_new_price"
-                                ),
+                                callback_data="skip_new_price",
                             )
                         ]
                     ]
@@ -1119,10 +1197,11 @@ async def private_text(
             await update.message.reply_text(
                 "✅ <b>Η ΔΙΑΔΡΟΜΗ "
                 "ΔΗΜΟΣΙΕΥΤΗΚΕ</b>\n\n"
-                f"Order #{order_id} is now "
-                "visible in the drivers group.\n\n"
-                "You can immediately create "
-                "another order if needed.",
+                f"Αριθμός: #{order_id}\n\n"
+                "Η διαδρομή εμφανίστηκε "
+                "στην ομάδα οδηγών.\n\n"
+                "Μπορείς να δώσεις αμέσως "
+                "και άλλη διαδρομή.",
                 parse_mode="HTML",
                 reply_markup=main_keyboard(
                     "driver"
@@ -1199,8 +1278,10 @@ async def private_text(
         if (
             not order
             or order["creator_id"] != user.id
-            or order["status"]
-            not in ("open", "taken")
+            or order["status"] not in (
+                "open",
+                "taken",
+            )
         ):
             user_state.pop(
                 user.id,
@@ -1208,8 +1289,11 @@ async def private_text(
             )
 
             await update.message.reply_text(
-                "This order can no longer "
-                "be edited.",
+                "Η διαδρομή δεν μπορεί "
+                "πλέον να αλλάξει."
+                if role == "driver"
+                else
+                "This order can no longer be edited.",
                 reply_markup=main_keyboard(role),
                 disable_notification=True,
             )
@@ -1228,11 +1312,10 @@ async def private_text(
                         order_id,
                     ),
                 )
-
                 conn.commit()
 
-        # Edit existing group message.
-        # No new group message = no new group notification.
+        # Edit existing group card.
+        # NO new group message.
         await refresh_group_card(
             context,
             order_id,
@@ -1255,9 +1338,9 @@ async def private_text(
                 await context.bot.send_message(
                     chat_id=updated["taker_id"],
                     text=(
-                        "⚠️ <b>ORDER UPDATED</b>\n\n"
-                        f"Order #{order_id} "
-                        "was changed by its creator.\n\n"
+                        "⚠️ <b>ΑΛΛΑΓΗ ΔΙΑΔΡΟΜΗΣ</b>\n\n"
+                        f"Η διαδρομή #{order_id} "
+                        "άλλαξε.\n\n"
                         f"{html.escape(text)}"
                     ),
                     parse_mode="HTML",
@@ -1268,15 +1351,16 @@ async def private_text(
                     ),
                     disable_notification=True,
                 )
-
             except Exception:
                 logger.exception(
-                    "Could not notify taker "
-                    "about order edit"
+                    "Could not notify taker"
                 )
 
         await update.message.reply_text(
-            "✅ Order details updated.",
+            "✅ Η διαδρομή ενημερώθηκε."
+            if role == "driver"
+            else
+            "✅ Order updated.",
             reply_markup=main_keyboard(role),
             disable_notification=True,
         )
@@ -1319,8 +1403,10 @@ async def private_text(
             not order
             or order["creator_id"] != user.id
             or order["creator_role"] != "client"
-            or order["status"]
-            not in ("open", "taken")
+            or order["status"] not in (
+                "open",
+                "taken",
+            )
         ):
             user_state.pop(
                 user.id,
@@ -1328,8 +1414,7 @@ async def private_text(
             )
 
             await update.message.reply_text(
-                "This order can no longer "
-                "be edited.",
+                "This order can no longer be edited.",
                 reply_markup=main_keyboard(role),
                 disable_notification=True,
             )
@@ -1350,7 +1435,6 @@ async def private_text(
                         order_id,
                     ),
                 )
-
                 conn.commit()
 
         await refresh_group_card(
@@ -1375,23 +1459,16 @@ async def private_text(
                 await context.bot.send_message(
                     chat_id=updated["taker_id"],
                     text=(
-                        "⚠️ <b>PRICE CHANGED</b>\n\n"
-                        f"Order #{order_id}\n"
-                        f"New price: €{price}"
+                        "⚠️ <b>ΑΛΛΑΓΗ ΤΙΜΗΣ</b>\n\n"
+                        f"Διαδρομή #{order_id}\n"
+                        f"Νέα τιμή: €{price}"
                     ),
                     parse_mode="HTML",
-                    reply_markup=(
-                        accepted_driver_keyboard(
-                            updated
-                        )
-                    ),
                     disable_notification=True,
                 )
-
             except Exception:
                 logger.exception(
-                    "Could not notify driver "
-                    "about price change"
+                    "Could not notify driver"
                 )
 
         await update.message.reply_text(
@@ -1404,7 +1481,7 @@ async def private_text(
 
 
 # =========================================================
-# CALLBACK BUTTONS
+# CALLBACKS
 # =========================================================
 
 async def callbacks(
@@ -1423,7 +1500,7 @@ async def callbacks(
     data = query.data or ""
 
     # =====================================================
-    # CLIENT SKIPS PRICE
+    # SKIP CLIENT PRICE
     # =====================================================
 
     if data == "skip_new_price":
@@ -1433,8 +1510,7 @@ async def callbacks(
 
         if (
             not state
-            or state.get("action")
-            != "new_price"
+            or state.get("action") != "new_price"
         ):
             await query.answer(
                 "This step has expired.",
@@ -1468,16 +1544,12 @@ async def callbacks(
 
         await context.bot.send_message(
             chat_id=user.id,
-            text=(
-                "Use the buttons below "
-                "to manage your orders."
-            ),
+            text="Use the buttons below.",
             reply_markup=main_keyboard(
                 "client"
             ),
             disable_notification=True,
         )
-
         return
 
     parts = data.split(
@@ -1501,7 +1573,7 @@ async def callbacks(
 
     if not order:
         await query.answer(
-            "Order not found.",
+            "Η διαδρομή δεν βρέθηκε.",
             show_alert=True,
         )
         return
@@ -1516,7 +1588,7 @@ async def callbacks(
             context,
         ):
             await query.answer(
-                "Drivers only.",
+                "Μόνο για οδηγούς.",
                 show_alert=True,
             )
             return
@@ -1526,7 +1598,8 @@ async def callbacks(
             and order["creator_id"] == user.id
         ):
             await query.answer(
-                "You cannot take your own trip.",
+                "Δεν μπορείς να πάρεις "
+                "τη δική σου διαδρομή.",
                 show_alert=True,
             )
             return
@@ -1544,12 +1617,11 @@ async def callbacks(
 
                 if (
                     not current
-                    or current["status"]
-                    != "open"
+                    or current["status"] != "open"
                 ):
                     await query.answer(
-                        "This trip is no longer "
-                        "available.",
+                        "Η διαδρομή δεν είναι "
+                        "πλέον διαθέσιμη.",
                         show_alert=True,
                     )
                     return
@@ -1576,8 +1648,7 @@ async def callbacks(
                     conn.rollback()
 
                     await query.answer(
-                        "Another driver already "
-                        "took this trip.",
+                        "Την πήρε ήδη άλλος οδηγός.",
                         show_alert=True,
                     )
                     return
@@ -1585,11 +1656,11 @@ async def callbacks(
                 conn.commit()
 
         await query.answer(
-            "✅ Trip accepted!"
+            "✅ Πήρες τη διαδρομή!"
         )
 
-        # Edit the original order card.
-        # No second group message.
+        # IMPORTANT:
+        # edit same group card, no new group message.
         await refresh_group_card(
             context,
             order_id,
@@ -1600,32 +1671,14 @@ async def callbacks(
         )
 
         try:
-            if (
-                updated["creator_role"]
-                == "client"
-            ):
-                creator_type = "CUSTOMER"
-            else:
-                creator_type = "CREATOR"
-
-            username_text = ""
-
-            if updated["creator_username"]:
-                username_text = (
-                    "\nUsername: @"
-                    f"{html.escape(updated['creator_username'])}"
-                )
-
             await context.bot.send_message(
                 chat_id=user.id,
                 text=(
-                    "✅ <b>YOU ACCEPTED "
-                    "THE ORDER</b>\n\n"
-                    f"🔢 Order: #{order_id}\n"
-                    f"👤 {creator_type}: "
+                    "✅ <b>ΠΗΡΕΣ ΤΗ ΔΙΑΔΡΟΜΗ</b>\n\n"
+                    f"🔢 Αριθμός: #{order_id}\n\n"
+                    f"{html.escape(updated['details'])}\n\n"
+                    f"👤 Από: "
                     f"{html.escape(updated['creator_name'])}"
-                    f"{username_text}\n\n"
-                    f"{html.escape(updated['details'])}"
                 ),
                 parse_mode="HTML",
                 reply_markup=(
@@ -1635,45 +1688,19 @@ async def callbacks(
                 ),
                 disable_notification=True,
             )
-
         except Exception:
             logger.exception(
-                "Could not send accepted "
-                "order to driver"
+                "Could not message taker"
             )
 
         try:
-            driver_username = ""
-
-            if user.username:
-                driver_username = (
-                    "\nUsername: @"
-                    f"{html.escape(user.username)}"
-                )
-
-            if (
-                updated["creator_role"]
-                == "client"
-            ):
-                title = (
-                    "🚖 <b>DRIVER FOUND</b>"
-                )
-            else:
-                title = (
-                    "✅ <b>YOUR TRIP "
-                    "WAS TAKEN</b>"
-                )
-
             await context.bot.send_message(
                 chat_id=updated["creator_id"],
                 text=(
-                    f"{title}\n\n"
-                    f"🔢 Order: #{order_id}\n"
-                    f"🚖 Driver: "
+                    "✅ <b>Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ</b>\n\n"
+                    f"🔢 Αριθμός: #{order_id}\n"
+                    f"🚖 Οδηγός: "
                     f"{html.escape(person_name(user))}"
-                    f"{driver_username}\n\n"
-                    "Tap the button below "
-                    "to contact the driver."
                 ),
                 parse_mode="HTML",
                 reply_markup=(
@@ -1683,34 +1710,27 @@ async def callbacks(
                 ),
                 disable_notification=True,
             )
-
         except Exception:
             logger.exception(
-                "Could not notify creator "
-                "about accepted order"
+                "Could not message creator"
             )
 
         return
 
     # =====================================================
-    # CREATOR-ONLY ACTIONS
+    # CREATOR ACTIONS
     # =====================================================
 
-    creator_actions = {
+    if action in {
         "manage",
         "edit_details",
         "edit_price",
         "cancel_order",
         "confirm_cancel",
-    }
-
-    if action in creator_actions:
-        if (
-            order["creator_id"]
-            != user.id
-        ):
+    }:
+        if order["creator_id"] != user.id:
             await query.answer(
-                "This is not your order.",
+                "Δεν είναι δική σου διαδρομή.",
                 show_alert=True,
             )
             return
@@ -1723,16 +1743,12 @@ async def callbacks(
         await query.answer()
 
         if order["status"] == "taken":
-            markup = (
-                accepted_creator_keyboard(
-                    order
-                )
+            markup = accepted_creator_keyboard(
+                order
             )
         else:
-            markup = (
-                creator_manage_keyboard(
-                    order
-                )
+            markup = creator_manage_keyboard(
+                order
             )
 
         await query.edit_message_text(
@@ -1740,7 +1756,6 @@ async def callbacks(
             parse_mode="HTML",
             reply_markup=markup,
         )
-
         return
 
     # -----------------------------------------------------
@@ -1753,8 +1768,7 @@ async def callbacks(
             "taken",
         ):
             await query.answer(
-                "This order cannot "
-                "be edited.",
+                "Δεν μπορεί να αλλάξει.",
                 show_alert=True,
             )
             return
@@ -1769,16 +1783,15 @@ async def callbacks(
         await context.bot.send_message(
             chat_id=user.id,
             text=(
-                "✏️ <b>EDIT ORDER</b>\n\n"
-                f"Send the NEW details "
-                f"for order #{order_id} "
-                "in one message."
+                "✏️ <b>ΑΛΛΑΓΗ ΣΤΟΙΧΕΙΩΝ</b>\n\n"
+                f"Στείλε τα ΝΕΑ στοιχεία "
+                f"για τη διαδρομή #{order_id} "
+                "σε ένα μήνυμα."
             ),
             parse_mode="HTML",
             reply_markup=cancel_keyboard(),
             disable_notification=True,
         )
-
         return
 
     # -----------------------------------------------------
@@ -1787,10 +1800,11 @@ async def callbacks(
 
     if action == "edit_price":
         if (
-            order["creator_role"]
-            != "client"
-            or order["status"]
-            not in ("open", "taken")
+            order["creator_role"] != "client"
+            or order["status"] not in (
+                "open",
+                "taken",
+            )
         ):
             await query.answer(
                 "Price cannot be changed.",
@@ -1809,7 +1823,7 @@ async def callbacks(
             chat_id=user.id,
             text=(
                 "💶 <b>CHANGE PRICE</b>\n\n"
-                f"Send the NEW price for "
+                f"Send the new price for "
                 f"order #{order_id}.\n"
                 "Example: 50"
             ),
@@ -1817,11 +1831,10 @@ async def callbacks(
             reply_markup=cancel_keyboard(),
             disable_notification=True,
         )
-
         return
 
     # -----------------------------------------------------
-    # ASK TO CANCEL
+    # ASK CANCEL
     # -----------------------------------------------------
 
     if action == "cancel_order":
@@ -1830,7 +1843,7 @@ async def callbacks(
             "taken",
         ):
             await query.answer(
-                "This order is already closed.",
+                "Η διαδρομή έχει ήδη κλείσει.",
                 show_alert=True,
             )
             return
@@ -1838,13 +1851,10 @@ async def callbacks(
         await query.answer()
 
         await query.edit_message_reply_markup(
-            reply_markup=(
-                confirm_cancel_keyboard(
-                    order_id
-                )
+            reply_markup=confirm_cancel_keyboard(
+                order_id
             )
         )
-
         return
 
     # -----------------------------------------------------
@@ -1857,7 +1867,7 @@ async def callbacks(
             "taken",
         ):
             await query.answer(
-                "This order is already closed.",
+                "Η διαδρομή έχει ήδη κλείσει.",
                 show_alert=True,
             )
             return
@@ -1874,22 +1884,20 @@ async def callbacks(
                     """,
                     (order_id,),
                 )
-
                 conn.commit()
 
         await query.answer(
-            "Order cancelled."
+            "Η διαδρομή ακυρώθηκε."
         )
 
-        # Existing card is edited.
-        # No new group notification.
+        # Edit same card. No new group message.
         await refresh_group_card(
             context,
             order_id,
         )
 
         await query.edit_message_text(
-            f"❌ Order #{order_id} cancelled."
+            f"❌ Η διαδρομή #{order_id} ακυρώθηκε."
         )
 
         if taker_id:
@@ -1897,25 +1905,23 @@ async def callbacks(
                 await context.bot.send_message(
                     chat_id=taker_id,
                     text=(
-                        "❌ <b>ORDER CANCELLED</b>\n\n"
-                        f"Order #{order_id} "
-                        "was cancelled by "
-                        "its creator."
+                        "❌ <b>Η ΔΙΑΔΡΟΜΗ ΑΚΥΡΩΘΗΚΕ</b>\n\n"
+                        f"Η διαδρομή #{order_id} "
+                        "ακυρώθηκε από αυτόν "
+                        "που την έδωσε."
                     ),
                     parse_mode="HTML",
                     disable_notification=True,
                 )
-
             except Exception:
                 logger.exception(
-                    "Could not notify driver "
-                    "about cancellation"
+                    "Could not notify taker"
                 )
 
         return
 
     # =====================================================
-    # DRIVER WHO TOOK ORDER
+    # TAKEN ORDER ACTIONS
     # =====================================================
 
     if action in (
@@ -1925,12 +1931,10 @@ async def callbacks(
     ):
         if (
             order["status"] != "taken"
-            or order["taker_id"]
-            != user.id
+            or order["taker_id"] != user.id
         ):
             await query.answer(
-                "This is no longer "
-                "your accepted order.",
+                "Η διαδρομή δεν είναι πλέον δική σου.",
                 show_alert=True,
             )
             return
@@ -1943,7 +1947,7 @@ async def callbacks(
         await query.answer()
 
         await query.edit_message_text(
-            "📦 <b>YOUR ACCEPTED ORDER</b>\n\n"
+            "📦 <b>ΔΙΑΔΡΟΜΗ ΠΟΥ ΠΗΡΑ</b>\n\n"
             + order_card(order),
             parse_mode="HTML",
             reply_markup=(
@@ -1952,7 +1956,6 @@ async def callbacks(
                 )
             ),
         )
-
         return
 
     # -----------------------------------------------------
@@ -1963,13 +1966,10 @@ async def callbacks(
         await query.answer()
 
         await query.edit_message_reply_markup(
-            reply_markup=(
-                confirm_giveup_keyboard(
-                    order_id
-                )
+            reply_markup=confirm_giveup_keyboard(
+                order_id
             )
         )
-
         return
 
     # -----------------------------------------------------
@@ -1990,13 +1990,11 @@ async def callbacks(
 
                 if (
                     not current
-                    or current["status"]
-                    != "taken"
-                    or current["taker_id"]
-                    != user.id
+                    or current["status"] != "taken"
+                    or current["taker_id"] != user.id
                 ):
                     await query.answer(
-                        "Order state changed.",
+                        "Η κατάσταση άλλαξε.",
                         show_alert=True,
                     )
                     return
@@ -2012,24 +2010,23 @@ async def callbacks(
                     """,
                     (order_id,),
                 )
-
                 conn.commit()
 
         await query.answer(
-            "Order returned."
+            "Η διαδρομή επέστρεψε."
         )
 
-        # Restore the button on the SAME group card.
-        # No new group message.
+        # Restore TAKE button on same group card.
+        # NO new group notification.
         await refresh_group_card(
             context,
             order_id,
         )
 
         await query.edit_message_text(
-            "↩️ <b>ORDER RETURNED</b>\n\n"
-            f"Order #{order_id} is available "
-            "to drivers again.",
+            "↩️ <b>ΑΦΗΣΕΣ ΤΗ ΔΙΑΔΡΟΜΗ</b>\n\n"
+            f"Η διαδρομή #{order_id} "
+            "είναι ξανά διαθέσιμη.",
             parse_mode="HTML",
         )
 
@@ -2037,19 +2034,17 @@ async def callbacks(
             await context.bot.send_message(
                 chat_id=order["creator_id"],
                 text=(
-                    "↩️ <b>DRIVER GAVE UP "
-                    "THE ORDER</b>\n\n"
-                    f"Order #{order_id} is "
-                    "available to drivers again."
+                    "↩️ <b>Η ΔΙΑΔΡΟΜΗ ΕΙΝΑΙ "
+                    "ΞΑΝΑ ΔΙΑΘΕΣΙΜΗ</b>\n\n"
+                    f"Ο οδηγός άφησε τη "
+                    f"διαδρομή #{order_id}."
                 ),
                 parse_mode="HTML",
                 disable_notification=True,
             )
-
         except Exception:
             logger.exception(
-                "Could not notify creator "
-                "about give up"
+                "Could not notify creator"
             )
 
         return
@@ -2058,7 +2053,7 @@ async def callbacks(
 
 
 # =========================================================
-# DRIVER GROUP MESSAGE CONTROL
+# DRIVER GROUP PROTECTION
 # =========================================================
 
 async def driver_group_text(
@@ -2071,7 +2066,7 @@ async def driver_group_text(
     if not update.message:
         return
 
-    # Administrators can write normal group messages.
+    # Admins may write normally.
     if await is_admin(
         update.effective_user.id,
         context,
@@ -2079,10 +2074,10 @@ async def driver_group_text(
         return
 
     # Backup protection.
-    # Ordinary drivers' text is removed.
+    # Group permissions already prevent normal drivers
+    # from writing.
     try:
         await update.message.delete()
-
     except Exception:
         pass
 
