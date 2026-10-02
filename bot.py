@@ -22,8 +22,15 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-GROUP_ID = -1004449292276
-NEW_ORDER_BUTTON = "🚕 Νέα διαδρομή"
+# Закрытая группа водителей
+DRIVERS_GROUP_ID = -1004449292276
+
+# Клиентская группа
+CLIENTS_GROUP_ID = -1004401199110
+
+DRIVER_NEW_ORDER_BUTTON = "🚕 Νέα διαδρομή"
+CLIENT_NEW_ORDER_BUTTON = "🚕 REQUEST A TAXI"
+CLIENT_SKIP_PRICE_BUTTON = "🤝 SKIP / NOT SURE"
 
 
 logging.basicConfig(
@@ -34,11 +41,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Кто сейчас вводит заказ:
-# user_id -> message_id сообщения ожидания
-waiting_for_order = {}
+# Водители, которые вводят заказ
+driver_waiting = {}
 
-# Открытые/принятые заказы
+# Клиенты:
+# user_id -> {
+#     "stage": "details" или "price",
+#     "waiting_message_id": ...,
+#     "text": ...
+# }
+client_waiting = {}
+
+# Все текущие заказы
 orders = {}
 
 next_order_id = 1
@@ -47,12 +61,12 @@ accept_lock = asyncio.Lock()
 
 
 # =========================================================
-# ПОСТОЯННАЯ КНОПКА "НОВЫЙ ЗАКАЗ"
+# КЛАВИАТУРА ВОДИТЕЛЕЙ
 # =========================================================
 
-def main_keyboard():
+def driver_keyboard():
     return ReplyKeyboardMarkup(
-        [[NEW_ORDER_BUTTON]],
+        [[DRIVER_NEW_ORDER_BUTTON]],
         resize_keyboard=True,
         is_persistent=True,
         selective=False,
@@ -61,13 +75,41 @@ def main_keyboard():
 
 
 # =========================================================
-# ПРОВЕРКА АДМИНИСТРАТОРА
+# ГЛАВНАЯ КЛАВИАТУРА КЛИЕНТОВ
 # =========================================================
 
-async def is_admin(context, user_id):
+def client_keyboard():
+    return ReplyKeyboardMarkup(
+        [[CLIENT_NEW_ORDER_BUTTON]],
+        resize_keyboard=True,
+        is_persistent=True,
+        selective=False,
+        input_field_placeholder="Request a taxi...",
+    )
+
+
+# =========================================================
+# КЛАВИАТУРА ВЫБОРА ЦЕНЫ
+# =========================================================
+
+def price_keyboard():
+    return ReplyKeyboardMarkup(
+        [[CLIENT_SKIP_PRICE_BUTTON]],
+        resize_keyboard=True,
+        is_persistent=True,
+        selective=False,
+        input_field_placeholder="Enter your offer in EUR...",
+    )
+
+
+# =========================================================
+# ПРОВЕРКА АДМИНИСТРАТОРА ВОДИТЕЛЕЙ
+# =========================================================
+
+async def is_driver_admin(context, user_id):
     try:
         member = await context.bot.get_chat_member(
-            chat_id=GROUP_ID,
+            chat_id=DRIVERS_GROUP_ID,
             user_id=user_id,
         )
 
@@ -78,7 +120,7 @@ async def is_admin(context, user_id):
 
     except Exception as e:
         logger.warning(
-            "Admin check failed: %s",
+            "Driver admin check failed: %s",
             e,
         )
         return False
@@ -86,7 +128,6 @@ async def is_admin(context, user_id):
 
 # =========================================================
 # /ID
-# Показывает ID текущего чата/группы
 # =========================================================
 
 async def show_id(
@@ -112,37 +153,57 @@ async def start(
     if not update.message:
         return
 
-    # Личный чат
-    if update.effective_chat.id != GROUP_ID:
-        await update.message.reply_text(
-            "🚕 Cyprus Drivers Order\n\n"
-            "Χρησιμοποίησε την ομάδα "
-            "«Κούρσες δωρεάν» για τις διαδρομές."
+    chat_id = update.effective_chat.id
+
+    # Группа водителей
+    if chat_id == DRIVERS_GROUP_ID:
+
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        await context.bot.send_message(
+            chat_id=DRIVERS_GROUP_ID,
+            text=(
+                "🚕 Για νέα διαδρομή πάτησε "
+                "το κουμπί παρακάτω."
+            ),
+            reply_markup=driver_keyboard(),
         )
         return
 
-    # В группе удаляем сам /start
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
+    # Клиентская группа
+    if chat_id == CLIENTS_GROUP_ID:
 
-    # Показываем постоянную кнопку
-    await context.bot.send_message(
-        chat_id=GROUP_ID,
-        text=(
-            "🚕 Για νέα διαδρομή πάτησε "
-            "το κουμπί παρακάτω."
-        ),
-        reply_markup=main_keyboard(),
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID,
+            text=(
+                "🚕 NEED A TAXI?\n\n"
+                "Tap the button below to request a taxi."
+            ),
+            reply_markup=client_keyboard(),
+        )
+        return
+
+    # Личный чат
+    await update.message.reply_text(
+        "🚕 Cyprus Taxi\n\n"
+        "Please use the Cyprus Taxi group "
+        "to request a taxi."
     )
 
 
 # =========================================================
-# СООБЩЕНИЯ В ГРУППЕ
+# СООБЩЕНИЯ В ГРУППЕ ВОДИТЕЛЕЙ
 # =========================================================
 
-async def group_message(
+async def driver_group_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -153,7 +214,7 @@ async def group_message(
     if not message:
         return
 
-    if update.effective_chat.id != GROUP_ID:
+    if update.effective_chat.id != DRIVERS_GROUP_ID:
         return
 
     user = update.effective_user
@@ -163,16 +224,13 @@ async def group_message(
 
     text = (message.text or "").strip()
 
+    # -----------------------------------------------------
+    # Водитель нажал "Νέα διαδρομή"
+    # -----------------------------------------------------
 
-    # =====================================================
-    # 1. НАЖАЛ "🚕 Νέα διαδρομή"
-    # =====================================================
+    if text == DRIVER_NEW_ORDER_BUTTON:
 
-    if text == NEW_ORDER_BUTTON:
-
-        # Удаляем старое ожидание этого водителя,
-        # если оно осталось
-        old_waiting_id = waiting_for_order.pop(
+        old_waiting_id = driver_waiting.pop(
             user.id,
             None,
         )
@@ -180,12 +238,11 @@ async def group_message(
         if old_waiting_id:
             try:
                 await context.bot.delete_message(
-                    chat_id=GROUP_ID,
+                    chat_id=DRIVERS_GROUP_ID,
                     message_id=old_waiting_id,
                 )
             except Exception:
                 pass
-
 
         driver_name = (
             user.first_name
@@ -193,29 +250,20 @@ async def group_message(
             or "Οδηγός"
         )
 
-
-        # Показываем ожидание информации
         waiting_message = await context.bot.send_message(
-            chat_id=GROUP_ID,
+            chat_id=DRIVERS_GROUP_ID,
             text=(
                 "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ\n\n"
                 f"⏳ Αναμονή πληροφοριών από "
                 f"{driver_name}..."
             ),
-            reply_markup=main_keyboard(),
+            reply_markup=driver_keyboard(),
         )
 
-
-        # Теперь этому водителю разрешено
-        # отправить одно сообщение с заказом
-        waiting_for_order[user.id] = (
+        driver_waiting[user.id] = (
             waiting_message.message_id
         )
 
-
-        # Удаляем сообщение,
-        # которое Telegram отправил после
-        # нажатия Reply-кнопки
         try:
             await message.delete()
         except Exception:
@@ -223,21 +271,16 @@ async def group_message(
 
         return
 
+    # -----------------------------------------------------
+    # Водитель вводит свой заказ
+    # -----------------------------------------------------
 
-    # =====================================================
-    # 2. ВОДИТЕЛЬ ВВОДИТ ИНФОРМАЦИЮ О ЗАКАЗЕ
-    # =====================================================
-
-    if user.id in waiting_for_order:
+    if user.id in driver_waiting:
 
         if not text:
             return
 
-
-        waiting_message_id = (
-            waiting_for_order[user.id]
-        )
-
+        waiting_message_id = driver_waiting[user.id]
 
         creator_name = (
             user.full_name
@@ -245,12 +288,9 @@ async def group_message(
             or "Οδηγός"
         )
 
-
         order_id = next_order_id
         next_order_id += 1
 
-
-        # Большая кнопка на отдельной строке
         order_keyboard = InlineKeyboardMarkup(
             [
                 [
@@ -262,11 +302,9 @@ async def group_message(
             ]
         )
 
-
-        # Сначала публикуем готовый заказ
         try:
             order_message = await context.bot.send_message(
-                chat_id=GROUP_ID,
+                chat_id=DRIVERS_GROUP_ID,
                 text=(
                     "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ\n\n"
                     f"{text}\n\n"
@@ -277,40 +315,35 @@ async def group_message(
 
         except Exception as e:
             logger.exception(
-                "Order publish failed: %s",
+                "Driver order publish failed: %s",
                 e,
             )
             return
 
-
-        # Сохраняем заказ
         orders[order_id] = {
+            "type": "driver",
             "creator_id": user.id,
             "creator_name": creator_name,
             "text": text,
+            "price": None,
             "status": "open",
-            "message_id": order_message.message_id,
+            "driver_message_id": order_message.message_id,
+            "client_message_id": None,
         }
 
-
-        # Ввод заказа закончен
-        waiting_for_order.pop(
+        driver_waiting.pop(
             user.id,
             None,
         )
 
-
-        # Удаляем исходное сообщение водителя
         try:
             await message.delete()
         except Exception:
             pass
 
-
-        # Удаляем сообщение ожидания
         try:
             await context.bot.delete_message(
-                chat_id=GROUP_ID,
+                chat_id=DRIVERS_GROUP_ID,
                 message_id=waiting_message_id,
             )
         except Exception:
@@ -318,44 +351,34 @@ async def group_message(
 
         return
 
+    # -----------------------------------------------------
+    # Обычные сообщения
+    # -----------------------------------------------------
 
-    # =====================================================
-    # 3. ОБЫЧНОЕ СООБЩЕНИЕ
-    # =====================================================
-
-    admin = await is_admin(
+    admin = await is_driver_admin(
         context,
         user.id,
     )
 
-
-    # Администраторы могут писать свободно
     if admin:
         return
 
-
-    # Обычный водитель без "Νέα διαδρομή"
-    # писать не может
     try:
         await message.delete()
     except Exception:
         pass
 
-
-    # Показываем ему кнопку ещё раз,
-    # чтобы он не оказался без неё
     try:
         helper_message = await context.bot.send_message(
-            chat_id=GROUP_ID,
+            chat_id=DRIVERS_GROUP_ID,
             text=(
                 f"👤 {user.first_name}\n\n"
                 "Για να στείλεις διαδρομή, "
                 "πάτησε «🚕 Νέα διαδρομή»."
             ),
-            reply_markup=main_keyboard(),
+            reply_markup=driver_keyboard(),
         )
 
-        # Даём телефону получить клавиатуру
         await asyncio.sleep(8)
 
         try:
@@ -365,13 +388,460 @@ async def group_message(
 
     except Exception as e:
         logger.warning(
-            "Keyboard helper failed: %s",
+            "Driver keyboard helper failed: %s",
             e,
         )
 
 
 # =========================================================
-# ВОДИТЕЛЬ БЕРЁТ ЗАКАЗ
+# СОЗДАНИЕ КЛИЕНТСКОГО ЗАКАЗА ПОСЛЕ ЦЕНЫ
+# =========================================================
+
+async def publish_client_order(
+    context,
+    user,
+    trip_text,
+    price,
+    price_waiting_message_id,
+):
+    global next_order_id
+
+    customer_name = (
+        user.full_name
+        or user.first_name
+        or "Customer"
+    )
+
+    order_id = next_order_id
+    next_order_id += 1
+
+    # Как цена показывается водителям
+    if price is None:
+        driver_price_text = "💶 Τιμή: Συζητήσιμη"
+        client_price_text = "💶 Price: To be discussed"
+    else:
+        driver_price_text = (
+            f"💶 Προσφορά πελάτη: €{price}"
+        )
+        client_price_text = (
+            f"💶 Your offer: €{price}"
+        )
+
+    driver_order_keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🚕 ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ 🚕",
+                    callback_data=f"take:{order_id}",
+                )
+            ]
+        ]
+    )
+
+    # -----------------------------------------------------
+    # Отправляем водителям
+    # -----------------------------------------------------
+
+    try:
+        driver_order_message = await context.bot.send_message(
+            chat_id=DRIVERS_GROUP_ID,
+            text=(
+                "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ — ΠΕΛΑΤΗΣ\n\n"
+                f"{trip_text}\n\n"
+                f"{driver_price_text}\n"
+                f"👤 Πελάτης: {customer_name}\n"
+                f"🔢 Αριθμός: #{order_id}"
+            ),
+            reply_markup=driver_order_keyboard,
+        )
+
+    except Exception as e:
+        logger.exception(
+            "Client order forwarding failed: %s",
+            e,
+        )
+
+        await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID,
+            text=(
+                "⚠️ Sorry, we could not send "
+                "your request to the drivers.\n"
+                "Please try again."
+            ),
+            reply_markup=client_keyboard(),
+        )
+
+        client_waiting.pop(
+            user.id,
+            None,
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # Карточка клиента
+    # -----------------------------------------------------
+
+    try:
+        client_status_message = await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID,
+            text=(
+                "🔎 LOOKING FOR A DRIVER\n\n"
+                f"{trip_text}\n\n"
+                f"{client_price_text}\n"
+                f"🔢 Request: #{order_id}\n\n"
+                "⏳ Your request has been sent "
+                "to our drivers."
+            ),
+            reply_markup=client_keyboard(),
+        )
+
+    except Exception as e:
+        logger.warning(
+            "Client status message failed: %s",
+            e,
+        )
+
+        client_status_message = None
+
+    orders[order_id] = {
+        "type": "client",
+        "creator_id": user.id,
+        "creator_name": customer_name,
+        "client_username": user.username,
+        "text": trip_text,
+        "price": price,
+        "status": "open",
+        "driver_message_id": (
+            driver_order_message.message_id
+        ),
+        "client_message_id": (
+            client_status_message.message_id
+            if client_status_message
+            else None
+        ),
+    }
+
+    client_waiting.pop(
+        user.id,
+        None,
+    )
+
+    # Удаляем вопрос о цене
+    if price_waiting_message_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=CLIENTS_GROUP_ID,
+                message_id=price_waiting_message_id,
+            )
+        except Exception:
+            pass
+
+
+# =========================================================
+# СООБЩЕНИЯ В КЛИЕНТСКОЙ ГРУППЕ
+# =========================================================
+
+async def client_group_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    message = update.message
+
+    if not message:
+        return
+
+    if update.effective_chat.id != CLIENTS_GROUP_ID:
+        return
+
+    user = update.effective_user
+
+    if not user or user.is_bot:
+        return
+
+    text = (message.text or "").strip()
+
+    # -----------------------------------------------------
+    # REQUEST A TAXI
+    # -----------------------------------------------------
+
+    if text == CLIENT_NEW_ORDER_BUTTON:
+
+        old_state = client_waiting.pop(
+            user.id,
+            None,
+        )
+
+        if old_state:
+            old_message_id = old_state.get(
+                "waiting_message_id"
+            )
+
+            if old_message_id:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=CLIENTS_GROUP_ID,
+                        message_id=old_message_id,
+                    )
+                except Exception:
+                    pass
+
+        customer_name = (
+            user.first_name
+            or user.full_name
+            or "Customer"
+        )
+
+        waiting_message = await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID,
+            text=(
+                "🚕 NEW TAXI REQUEST\n\n"
+                f"👤 {customer_name}\n\n"
+                "✍️ Please send your trip details "
+                "in one message.\n\n"
+                "For example:\n"
+                "Pickup: Larnaca Airport\n"
+                "Destination: Limassol\n"
+                "Time: 14:30\n"
+                "Passengers: 2"
+            ),
+            reply_markup=client_keyboard(),
+        )
+
+        client_waiting[user.id] = {
+            "stage": "details",
+            "waiting_message_id": (
+                waiting_message.message_id
+            ),
+            "text": None,
+        }
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        return
+
+    # -----------------------------------------------------
+    # КЛИЕНТ ВВОДИТ ДЕТАЛИ
+    # -----------------------------------------------------
+
+    state = client_waiting.get(user.id)
+
+    if state and state["stage"] == "details":
+
+        if not text:
+            return
+
+        old_waiting_message_id = state.get(
+            "waiting_message_id"
+        )
+
+        trip_text = text
+
+        # Удаляем исходный текст клиента
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        # Удаляем старую инструкцию
+        if old_waiting_message_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=CLIENTS_GROUP_ID,
+                    message_id=old_waiting_message_id,
+                )
+            except Exception:
+                pass
+
+        # Теперь спрашиваем цену
+        price_message = await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID,
+            text=(
+                "💶 HOW MUCH ARE YOU WILLING TO PAY?\n\n"
+                "Enter your offer in EUR.\n"
+                "For example: 50\n\n"
+                "If you are not sure, tap "
+                "«🤝 SKIP / NOT SURE»."
+            ),
+            reply_markup=price_keyboard(),
+        )
+
+        client_waiting[user.id] = {
+            "stage": "price",
+            "waiting_message_id": (
+                price_message.message_id
+            ),
+            "text": trip_text,
+        }
+
+        return
+
+    # -----------------------------------------------------
+    # КЛИЕНТ ВЫБИРАЕТ SKIP / NOT SURE
+    # -----------------------------------------------------
+
+    if (
+        state
+        and state["stage"] == "price"
+        and text == CLIENT_SKIP_PRICE_BUTTON
+    ):
+
+        trip_text = state["text"]
+
+        price_waiting_message_id = state.get(
+            "waiting_message_id"
+        )
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        await publish_client_order(
+            context=context,
+            user=user,
+            trip_text=trip_text,
+            price=None,
+            price_waiting_message_id=(
+                price_waiting_message_id
+            ),
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # КЛИЕНТ ВВОДИТ ЦЕНУ
+    # -----------------------------------------------------
+
+    if state and state["stage"] == "price":
+
+        # Разрешаем:
+        # 50
+        # €50
+        # 50€
+        cleaned_price = (
+            text.replace("€", "")
+            .replace(",", ".")
+            .strip()
+        )
+
+        try:
+            price_number = float(cleaned_price)
+
+            if price_number <= 0:
+                raise ValueError
+
+            # Красивое отображение без .0
+            if price_number.is_integer():
+                price = str(int(price_number))
+            else:
+                price = (
+                    f"{price_number:.2f}"
+                    .rstrip("0")
+                    .rstrip(".")
+                )
+
+        except ValueError:
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+            error_message = await context.bot.send_message(
+                chat_id=CLIENTS_GROUP_ID,
+                text=(
+                    "⚠️ Please enter only the amount "
+                    "in EUR.\n\n"
+                    "Example: 50\n\n"
+                    "Or tap «🤝 SKIP / NOT SURE»."
+                ),
+                reply_markup=price_keyboard(),
+            )
+
+            # Обновляем ID подсказки,
+            # чтобы не потерять клавиатуру
+            old_price_message_id = state.get(
+                "waiting_message_id"
+            )
+
+            if old_price_message_id:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=CLIENTS_GROUP_ID,
+                        message_id=old_price_message_id,
+                    )
+                except Exception:
+                    pass
+
+            state["waiting_message_id"] = (
+                error_message.message_id
+            )
+
+            return
+
+        trip_text = state["text"]
+
+        price_waiting_message_id = state.get(
+            "waiting_message_id"
+        )
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        await publish_client_order(
+            context=context,
+            user=user,
+            trip_text=trip_text,
+            price=price,
+            price_waiting_message_id=(
+                price_waiting_message_id
+            ),
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ОБЫЧНОЕ СООБЩЕНИЕ КЛИЕНТА
+    # -----------------------------------------------------
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    try:
+        helper_message = await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID,
+            text=(
+                f"👤 {user.first_name}\n\n"
+                "To request a taxi, tap "
+                "«🚕 REQUEST A TAXI» below."
+            ),
+            reply_markup=client_keyboard(),
+        )
+
+        await asyncio.sleep(8)
+
+        try:
+            await helper_message.delete()
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.warning(
+            "Client keyboard helper failed: %s",
+            e,
+        )
+
+
+# =========================================================
+# ВОДИТЕЛЬ ПРИНИМАЕТ ЗАКАЗ
 # =========================================================
 
 async def take_order(
@@ -385,7 +855,6 @@ async def take_order(
 
     user = query.from_user
 
-
     try:
         order_id = int(
             query.data.split(":")[1]
@@ -394,12 +863,9 @@ async def take_order(
         await query.answer()
         return
 
-
-    # Защита: заказ получает только первый
     async with accept_lock:
 
         order = orders.get(order_id)
-
 
         if not order:
             await query.answer(
@@ -408,9 +874,12 @@ async def take_order(
             )
             return
 
-
-        # Свой заказ брать нельзя
-        if user.id == order["creator_id"]:
+        # Водитель не может взять
+        # собственный водительский заказ
+        if (
+            order["type"] == "driver"
+            and user.id == order["creator_id"]
+        ):
             await query.answer(
                 "Δεν μπορείς να πάρεις "
                 "τη δική σου διαδρομή.",
@@ -418,8 +887,6 @@ async def take_order(
             )
             return
 
-
-        # Заказ уже забрали
         if order["status"] != "open":
             await query.answer(
                 "Η διαδρομή έχει ήδη δοθεί.",
@@ -427,26 +894,18 @@ async def take_order(
             )
             return
 
-
         order["status"] = "accepted"
         order["accepted_by"] = user.id
-
 
     await query.answer(
         "Η διαδρομή είναι δική σου! ✅"
     )
-
-
-    # =====================================================
-    # ДАННЫЕ ВОДИТЕЛЯ
-    # =====================================================
 
     driver_name = (
         user.full_name
         or user.first_name
         or "Οδηγός"
     )
-
 
     safe_driver_name = html.escape(
         driver_name
@@ -460,26 +919,48 @@ async def take_order(
         order["text"]
     )
 
-
-    # Кликабельное имя внутри текста
     driver_link = (
         f'<a href="tg://user?id={user.id}">'
         f'{safe_driver_name}</a>'
     )
 
-
     # =====================================================
-    # ТЕКСТ ПОСЛЕ ПРИНЯТИЯ
+    # КАРТОЧКА В ГРУППЕ ВОДИТЕЛЕЙ
     # =====================================================
 
-    accepted_text = (
-        "✅ Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ\n\n"
-        f"{safe_order_text}\n\n"
-        f"👤 Από: {safe_creator_name}\n"
-        f"🚕 Την πήρε: {driver_link}\n"
-        f"🆔 Telegram ID: <code>{user.id}</code>"
-    )
+    if order["type"] == "client":
 
+        if order["price"] is None:
+            price_text = (
+                "💶 Τιμή: Συζητήσιμη"
+            )
+        else:
+            price_text = (
+                "💶 Προσφορά πελάτη: "
+                f"€{html.escape(order['price'])}"
+            )
+
+        accepted_text = (
+            "✅ Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ\n\n"
+            f"{safe_order_text}\n\n"
+            f"{price_text}\n"
+            f"👤 Πελάτης: {safe_creator_name}\n"
+            f"🚕 Την πήρε: {driver_link}\n"
+            f"🆔 Telegram ID: "
+            f"<code>{user.id}</code>\n"
+            f"🔢 Αριθμός: #{order_id}"
+        )
+
+    else:
+
+        accepted_text = (
+            "✅ Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ\n\n"
+            f"{safe_order_text}\n\n"
+            f"👤 Από: {safe_creator_name}\n"
+            f"🚕 Την πήρε: {driver_link}\n"
+            f"🆔 Telegram ID: "
+            f"<code>{user.id}</code>"
+        )
 
     if user.username:
         accepted_text += (
@@ -487,59 +968,150 @@ async def take_order(
             f"@{html.escape(user.username)}"
         )
 
+    # Кнопка профиля водителя
+    if user.username:
 
-    # =====================================================
-    # БОЛЬШАЯ КНОПКА "ОТКРЫТЬ ПРОФИЛЬ"
-    # =====================================================
-
-    profile_keyboard = InlineKeyboardMarkup(
-        [
+        driver_profile_keyboard = InlineKeyboardMarkup(
             [
-                InlineKeyboardButton(
-                    "👤 ΑΝΟΙΓΜΑ ΠΡΟΦΙΛ ΟΔΗΓΟΥ",
-                    url=f"tg://user?id={user.id}",
-                )
+                [
+                    InlineKeyboardButton(
+                        "👤 ΑΝΟΙΓΜΑ ΠΡΟΦΙΛ ΟΔΗΓΟΥ",
+                        url=f"https://t.me/{user.username}",
+                    )
+                ]
             ]
-        ]
-    )
+        )
 
+    else:
+        driver_profile_keyboard = None
 
-    # Обновляем тот же заказ
     await query.edit_message_text(
         text=accepted_text,
         parse_mode="HTML",
-        reply_markup=profile_keyboard,
+        reply_markup=driver_profile_keyboard,
     )
 
-
     # =====================================================
-    # ЛИЧНОЕ УВЕДОМЛЕНИЕ АВТОРУ
+    # КЛИЕНТСКИЙ ЗАКАЗ
     # =====================================================
 
-    try:
-        private_text = (
-            "✅ Η διαδρομή σου δόθηκε.\n\n"
-            f"🚕 Οδηγός: {driver_name}\n"
-            f"🆔 Telegram ID: {user.id}"
-        )
+    if order["type"] == "client":
 
-
-        if user.username:
-            private_text += (
-                f"\n💬 Telegram: @{user.username}"
+        if order["price"] is None:
+            client_price_text = (
+                "💶 Price: To be discussed"
+            )
+        else:
+            client_price_text = (
+                "💶 Your offer: "
+                f"€{html.escape(order['price'])}"
             )
 
-
-        await context.bot.send_message(
-            chat_id=order["creator_id"],
-            text=private_text,
+        client_text = (
+            "✅ DRIVER FOUND\n\n"
+            f"{safe_order_text}\n\n"
+            f"{client_price_text}\n"
+            f"🚕 Driver: {driver_link}\n"
+            f"🔢 Request: #{order_id}"
         )
 
-    except Exception:
-        # Если человек раньше не открывал бота
-        # лично, Telegram может не разрешить
-        # отправить ему личное сообщение
-        pass
+        if user.username:
+            client_text += (
+                "\n💬 Telegram: "
+                f"@{html.escape(user.username)}"
+            )
+
+        if user.username:
+
+            client_driver_keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "👤 OPEN DRIVER PROFILE",
+                            url=(
+                                f"https://t.me/"
+                                f"{user.username}"
+                            ),
+                        )
+                    ]
+                ]
+            )
+
+        else:
+            client_driver_keyboard = None
+
+        # Обновляем карточку клиента
+        if order.get("client_message_id"):
+
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=CLIENTS_GROUP_ID,
+                    message_id=order[
+                        "client_message_id"
+                    ],
+                    text=client_text,
+                    parse_mode="HTML",
+                    reply_markup=(
+                        client_driver_keyboard
+                    ),
+                )
+
+            except Exception as e:
+                logger.warning(
+                    "Client card update failed: %s",
+                    e,
+                )
+
+        # Пытаемся написать клиенту лично
+        try:
+            private_client_text = (
+                "✅ DRIVER FOUND\n\n"
+                f"🚕 Driver: {driver_name}\n"
+                f"{client_price_text}\n"
+                f"🔢 Request: #{order_id}"
+            )
+
+            if user.username:
+                private_client_text += (
+                    f"\n💬 Telegram: "
+                    f"@{user.username}"
+                )
+
+            await context.bot.send_message(
+                chat_id=order["creator_id"],
+                text=private_client_text,
+                reply_markup=client_driver_keyboard,
+            )
+
+        except Exception:
+            pass
+
+    # =====================================================
+    # ВОДИТЕЛЬСКИЙ ЗАКАЗ
+    # =====================================================
+
+    else:
+
+        try:
+            private_text = (
+                "✅ Η διαδρομή σου δόθηκε.\n\n"
+                f"🚕 Οδηγός: {driver_name}\n"
+                f"🆔 Telegram ID: {user.id}"
+            )
+
+            if user.username:
+                private_text += (
+                    f"\n💬 Telegram: "
+                    f"@{user.username}"
+                )
+
+            await context.bot.send_message(
+                chat_id=order["creator_id"],
+                text=private_text,
+            )
+
+        except Exception:
+            pass
 
 
 # =========================================================
@@ -567,13 +1139,11 @@ def main():
             "BOT_TOKEN is not set"
         )
 
-
     app = (
         Application.builder()
         .token(TOKEN)
         .build()
     )
-
 
     app.add_handler(
         CommandHandler(
@@ -582,15 +1152,12 @@ def main():
         )
     )
 
-
-    # Команда для получения ID любой группы
     app.add_handler(
         CommandHandler(
             "id",
             show_id,
         )
     )
-
 
     app.add_handler(
         CallbackQueryHandler(
@@ -599,21 +1166,29 @@ def main():
         )
     )
 
-
+    # Группа водителей
     app.add_handler(
         MessageHandler(
-            filters.Chat(GROUP_ID)
+            filters.Chat(DRIVERS_GROUP_ID)
             & filters.TEXT
             & ~filters.COMMAND,
-            group_message,
+            driver_group_message,
         )
     )
 
+    # Клиентская группа
+    app.add_handler(
+        MessageHandler(
+            filters.Chat(CLIENTS_GROUP_ID)
+            & filters.TEXT
+            & ~filters.COMMAND,
+            client_group_message,
+        )
+    )
 
     app.add_error_handler(
         error_handler
     )
-
 
     app.run_polling(
         drop_pending_updates=True
