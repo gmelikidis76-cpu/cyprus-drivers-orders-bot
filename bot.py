@@ -20,7 +20,13 @@ from telegram.ext import (
     filters,
 )
 
+
+# =========================================================
+# SETTINGS
+# =========================================================
+
 TOKEN = os.getenv("BOT_TOKEN")
+
 DRIVERS_GROUP_ID = -1004449292276
 DB_PATH = os.getenv("DB_PATH", "/data/orders.db")
 
@@ -28,58 +34,202 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+
 logger = logging.getLogger(__name__)
 
 db_lock = asyncio.Lock()
+
+# Temporary conversation state.
+# Orders themselves are stored permanently in SQLite.
 user_state = {}
+
+
+# =========================================================
+# BUTTON TEXT
+# =========================================================
 
 BTN_NEW_DRIVER = "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ"
 BTN_NEW_CLIENT = "🚕 REQUEST A TAXI"
+
 BTN_MY_ORDER = "📋 MY ORDER"
 BTN_TAKEN = "📦 MY TAKEN ORDER"
+
 BTN_CANCEL = "❌ CANCEL"
 
 
+# =========================================================
+# DATABASE
+# =========================================================
+
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+    )
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    directory = os.path.dirname(DB_PATH)
+
+    if directory:
+        os.makedirs(
+            directory,
+            exist_ok=True,
+        )
+
     with db() as conn:
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+
                 creator_id INTEGER NOT NULL,
                 creator_name TEXT NOT NULL,
                 creator_username TEXT,
+
                 creator_role TEXT NOT NULL,
+
                 details TEXT NOT NULL,
                 price TEXT,
+
                 status TEXT NOT NULL DEFAULT 'open',
+
                 taker_id INTEGER,
                 taker_name TEXT,
                 taker_username TEXT,
+
                 group_chat_id INTEGER,
                 group_message_id INTEGER,
+
                 created_at TEXT NOT NULL
             )
-        """)
+            """
+        )
+
         conn.commit()
 
 
-def person_name(user):
-    return user.full_name or user.first_name or "Telegram user"
+def get_order(order_id):
+    with db() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM orders
+            WHERE id = ?
+            """,
+            (order_id,),
+        ).fetchone()
 
+
+def get_creator_active_order(user_id):
+    with db() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM orders
+            WHERE creator_id = ?
+              AND status IN ('open', 'taken')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+
+
+def get_taken_order(user_id):
+    with db() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM orders
+            WHERE taker_id = ?
+              AND status = 'taken'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def person_name(user):
+    return (
+        user.full_name
+        or user.first_name
+        or "Telegram user"
+    )
+
+
+def contact_url(user_id, username=None):
+    if username:
+        return f"https://t.me/{username}"
+
+    return f"tg://user?id={user_id}"
+
+
+async def is_driver(user_id, context):
+    try:
+        member = await context.bot.get_chat_member(
+            DRIVERS_GROUP_ID,
+            user_id,
+        )
+
+        return member.status not in (
+            "left",
+            "kicked",
+        )
+
+    except Exception:
+        logger.exception(
+            "Could not check driver membership"
+        )
+        return False
+
+
+async def is_admin(user_id, context):
+    try:
+        member = await context.bot.get_chat_member(
+            DRIVERS_GROUP_ID,
+            user_id,
+        )
+
+        return member.status in (
+            "administrator",
+            "creator",
+        )
+
+    except Exception:
+        return False
+
+
+async def role_for(user_id, context):
+    if await is_driver(
+        user_id,
+        context,
+    ):
+        return "driver"
+
+    return "client"
+
+
+# =========================================================
+# MAIN PRIVATE KEYBOARDS
+# =========================================================
 
 def main_keyboard(role):
     if role == "driver":
         return ReplyKeyboardMarkup(
             [
                 [BTN_NEW_DRIVER],
-                [BTN_MY_ORDER, BTN_TAKEN],
+                [
+                    BTN_MY_ORDER,
+                    BTN_TAKEN,
+                ],
             ],
             resize_keyboard=True,
             is_persistent=True,
@@ -95,7 +245,7 @@ def main_keyboard(role):
     )
 
 
-def cancel_keyboard(role):
+def cancel_keyboard():
     return ReplyKeyboardMarkup(
         [[BTN_CANCEL]],
         resize_keyboard=True,
@@ -103,43 +253,20 @@ def cancel_keyboard(role):
     )
 
 
-async def is_driver(user_id, context):
-    try:
-        member = await context.bot.get_chat_member(
-            DRIVERS_GROUP_ID,
-            user_id,
-        )
-        return member.status not in ("left", "kicked")
-    except Exception:
-        logger.exception("Could not check driver membership")
-        return False
-
-
-async def is_admin(user_id, context):
-    try:
-        member = await context.bot.get_chat_member(
-            DRIVERS_GROUP_ID,
-            user_id,
-        )
-        return member.status in ("administrator", "creator")
-    except Exception:
-        return False
-
-
-async def role_for(user_id, context):
-    if await is_driver(user_id, context):
-        return "driver"
-    return "client"
-
+# =========================================================
+# INLINE ORDER BUTTONS
+# =========================================================
 
 def open_order_keyboard(order_id):
     return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton(
-                "🚕 ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ 🚕",
-                callback_data=f"take:{order_id}",
-            )
-        ]]
+        [
+            [
+                InlineKeyboardButton(
+                    "🚕 ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ 🚕",
+                    callback_data=f"take:{order_id}",
+                )
+            ]
+        ]
     )
 
 
@@ -148,7 +275,9 @@ def creator_manage_keyboard(order):
         [
             InlineKeyboardButton(
                 "✏️ EDIT DETAILS",
-                callback_data=f"edit_details:{order['id']}",
+                callback_data=(
+                    f"edit_details:{order['id']}"
+                ),
             )
         ]
     ]
@@ -158,7 +287,9 @@ def creator_manage_keyboard(order):
             [
                 InlineKeyboardButton(
                     "💶 CHANGE PRICE",
-                    callback_data=f"edit_price:{order['id']}",
+                    callback_data=(
+                        f"edit_price:{order['id']}"
+                    ),
                 )
             ]
         )
@@ -167,7 +298,9 @@ def creator_manage_keyboard(order):
         [
             InlineKeyboardButton(
                 "❌ CANCEL ORDER",
-                callback_data=f"cancel_order:{order['id']}",
+                callback_data=(
+                    f"cancel_order:{order['id']}"
+                ),
             )
         ]
     )
@@ -175,131 +308,200 @@ def creator_manage_keyboard(order):
     return InlineKeyboardMarkup(rows)
 
 
-def give_up_keyboard(order_id):
+def confirm_cancel_keyboard(order_id):
     return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton(
-                "↩️ GIVE UP ORDER",
-                callback_data=f"giveup:{order_id}",
-            )
-        ]]
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ YES, CANCEL",
+                    callback_data=(
+                        f"confirm_cancel:{order_id}"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    "↩️ BACK",
+                    callback_data=(
+                        f"manage:{order_id}"
+                    ),
+                ),
+            ]
+        ]
     )
 
 
-def confirm_cancel_keyboard(order_id):
+def accepted_driver_keyboard(order):
+    creator_label = (
+        "💬 CONTACT CUSTOMER"
+        if order["creator_role"] == "client"
+        else "💬 CONTACT CREATOR"
+    )
+
+    creator_url = contact_url(
+        order["creator_id"],
+        order["creator_username"],
+    )
+
     return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton(
-                "✅ YES, CANCEL",
-                callback_data=f"confirm_cancel:{order_id}",
+        [
+            [
+                InlineKeyboardButton(
+                    creator_label,
+                    url=creator_url,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "↩️ GIVE UP ORDER",
+                    callback_data=(
+                        f"giveup:{order['id']}"
+                    ),
+                )
+            ],
+        ]
+    )
+
+
+def accepted_creator_keyboard(order):
+    if not order["taker_id"]:
+        return creator_manage_keyboard(order)
+
+    driver_url = contact_url(
+        order["taker_id"],
+        order["taker_username"],
+    )
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "💬 CONTACT DRIVER",
+                    url=driver_url,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✏️ EDIT DETAILS",
+                    callback_data=(
+                        f"edit_details:{order['id']}"
+                    ),
+                )
+            ],
+            *(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "💶 CHANGE PRICE",
+                            callback_data=(
+                                f"edit_price:{order['id']}"
+                            ),
+                        )
+                    ]
+                ]
+                if order["creator_role"] == "client"
+                else []
             ),
-            InlineKeyboardButton(
-                "↩️ BACK",
-                callback_data=f"manage:{order_id}",
-            ),
-        ]]
+            [
+                InlineKeyboardButton(
+                    "❌ CANCEL ORDER",
+                    callback_data=(
+                        f"cancel_order:{order['id']}"
+                    ),
+                )
+            ],
+        ]
     )
 
 
 def confirm_giveup_keyboard(order_id):
     return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton(
-                "✅ YES, GIVE UP",
-                callback_data=f"confirm_giveup:{order_id}",
-            ),
-            InlineKeyboardButton(
-                "↩️ BACK",
-                callback_data=f"taken:{order_id}",
-            ),
-        ]]
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ YES, GIVE UP",
+                    callback_data=(
+                        f"confirm_giveup:{order_id}"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    "↩️ BACK",
+                    callback_data=(
+                        f"taken:{order_id}"
+                    ),
+                ),
+            ]
+        ]
     )
 
 
+# =========================================================
+# ORDER CARD
+# =========================================================
+
 def order_card(order):
-    details = html.escape(order["details"])
-    creator = html.escape(order["creator_name"])
-    number = order["id"]
+    details = html.escape(
+        order["details"]
+    )
+
+    creator = html.escape(
+        order["creator_name"]
+    )
+
+    order_id = order["id"]
 
     if order["creator_role"] == "client":
-        price = order["price"]
-
-        if price:
-            price_line = f"€{html.escape(price)}"
+        if order["price"]:
+            price_line = (
+                f"€{html.escape(order['price'])}"
+            )
         else:
             price_line = "🤝 Negotiable"
 
-        body = (
+        text = (
             "🚕 <b>ΝΕΑ ΔΙΑΔΡΟΜΗ — ΠΕΛΑΤΗΣ</b>\n\n"
             f"{details}\n\n"
-            f"💶 Προσφορά πελάτη: <b>{price_line}</b>\n"
+            f"💶 Προσφορά πελάτη: "
+            f"<b>{price_line}</b>\n"
             f"👤 Πελάτης: {creator}\n"
-            f"🔢 Αριθμός: #{number}"
+            f"🔢 Αριθμός: #{order_id}"
         )
 
     else:
-        body = (
-            "🚕 <b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>\n\n"
+        text = (
+            "🚕 <b>ΝΕΑ ΔΙΑΔΡΟΜΗ — ΟΔΗΓΟΣ</b>\n\n"
             f"{details}\n\n"
             f"👤 Από: {creator}\n"
-            f"🔢 Αριθμός: #{number}"
+            f"🔢 Αριθμός: #{order_id}"
         )
 
     if order["status"] == "taken":
-        taker = html.escape(order["taker_name"] or "Driver")
+        taker = html.escape(
+            order["taker_name"]
+            or "Driver"
+        )
 
-        body += (
+        text += (
             "\n\n"
             "✅ <b>Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ</b>\n"
             f"🚖 Οδηγός: {taker}"
         )
 
     elif order["status"] == "cancelled":
-        body += "\n\n❌ <b>ΑΚΥΡΩΘΗΚΕ</b>"
+        text += (
+            "\n\n"
+            "❌ <b>ΑΚΥΡΩΘΗΚΕ</b>"
+        )
 
-    elif order["status"] == "closed":
-        body += "\n\n🏁 <b>ΟΛΟΚΛΗΡΩΘΗΚΕ</b>"
-
-    return body
-
-
-def get_order(order_id):
-    with db() as conn:
-        return conn.execute(
-            "SELECT * FROM orders WHERE id = ?",
-            (order_id,),
-        ).fetchone()
+    return text
 
 
-def get_creator_active_order(user_id):
-    with db() as conn:
-        return conn.execute(
-            """
-            SELECT * FROM orders
-            WHERE creator_id = ?
-            AND status IN ('open', 'taken')
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (user_id,),
-        ).fetchone()
+# =========================================================
+# GROUP CARD UPDATE
+# =========================================================
 
-
-def get_taken_order(user_id):
-    with db() as conn:
-        return conn.execute(
-            """
-            SELECT * FROM orders
-            WHERE taker_id = ?
-            AND status = 'taken'
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (user_id,),
-        ).fetchone()
-
-
-async def refresh_group_card(context, order_id):
+async def refresh_group_card(
+    context,
+    order_id,
+):
     order = get_order(order_id)
 
     if not order:
@@ -308,10 +510,12 @@ async def refresh_group_card(context, order_id):
     if not order["group_message_id"]:
         return
 
+    markup = None
+
     if order["status"] == "open":
-        markup = open_order_keyboard(order_id)
-    else:
-        markup = None
+        markup = open_order_keyboard(
+            order_id
+        )
 
     try:
         await context.bot.edit_message_text(
@@ -321,9 +525,16 @@ async def refresh_group_card(context, order_id):
             parse_mode="HTML",
             reply_markup=markup,
         )
-    except Exception:
-        logger.exception("Could not refresh group order card")
 
+    except Exception:
+        logger.exception(
+            "Could not refresh group card"
+        )
+
+
+# =========================================================
+# CREATE ORDER
+# =========================================================
 
 async def create_order(
     context,
@@ -334,7 +545,7 @@ async def create_order(
 ):
     async with db_lock:
         with db() as conn:
-            cur = conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO orders (
                     creator_id,
@@ -355,20 +566,26 @@ async def create_order(
                     role,
                     details,
                     price,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat(),
                 ),
             )
 
-            order_id = cur.lastrowid
+            order_id = cursor.lastrowid
             conn.commit()
 
     order = get_order(order_id)
 
+    # THIS is the actual new order notification.
+    # It is intentionally NOT silent.
     message = await context.bot.send_message(
         chat_id=DRIVERS_GROUP_ID,
         text=order_card(order),
         parse_mode="HTML",
-        reply_markup=open_order_keyboard(order_id),
+        reply_markup=(
+            open_order_keyboard(order_id)
+        ),
         disable_notification=False,
     )
 
@@ -387,10 +604,15 @@ async def create_order(
                     order_id,
                 ),
             )
+
             conn.commit()
 
     return order_id
 
+
+# =========================================================
+# /START
+# =========================================================
 
 async def start(
     update: Update,
@@ -402,32 +624,39 @@ async def start(
     if not update.effective_chat:
         return
 
+    # Group /start is not part of normal operation.
     if update.effective_chat.type != "private":
-        if update.effective_chat.id == DRIVERS_GROUP_ID:
+        if (
+            update.effective_chat.id
+            == DRIVERS_GROUP_ID
+        ):
             try:
                 await update.effective_message.delete()
             except Exception:
                 pass
+
         return
 
     payload = ""
 
     if context.args:
-        payload = context.args[0].lower()
+        payload = (
+            context.args[0]
+            .strip()
+            .lower()
+        )
 
     if payload == "client":
         role = "client"
 
     elif payload == "driver":
-        allowed = await is_driver(
+        if not await is_driver(
             update.effective_user.id,
             context,
-        )
-
-        if not allowed:
+        ):
             await update.message.reply_text(
-                "⛔ Driver access is available only to members "
-                "of the drivers group."
+                "⛔ Driver access is available "
+                "only to members of the drivers group."
             )
             return
 
@@ -447,17 +676,19 @@ async def start(
     if role == "driver":
         text = (
             "🚕 <b>DRIVER MENU</b>\n\n"
-            "To create a trip, tap "
-            "<b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>.\n\n"
-            "New customer orders will appear "
-            "in the drivers group."
+            "Want to give a trip to another driver?\n"
+            "Tap <b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>.\n\n"
+            "Want to take a trip?\n"
+            "Open the drivers group and tap "
+            "<b>ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ</b> "
+            "under an available order."
         )
 
     else:
         text = (
             "🚕 <b>CYPRUS TAXI</b>\n\n"
-            "To request a taxi, tap "
-            "<b>REQUEST A TAXI</b>."
+            "Need a taxi?\n"
+            "Tap <b>REQUEST A TAXI</b> below."
         )
 
     await update.message.reply_text(
@@ -467,15 +698,24 @@ async def start(
     )
 
 
+# =========================================================
+# /ID
+# =========================================================
+
 async def id_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     if update.effective_chat:
         await update.effective_message.reply_text(
-            f"Chat ID: {update.effective_chat.id}"
+            f"Chat ID: "
+            f"{update.effective_chat.id}"
         )
 
+
+# =========================================================
+# START NEW ORDER FLOW
+# =========================================================
 
 async def begin_new_order(
     update,
@@ -484,13 +724,16 @@ async def begin_new_order(
 ):
     user = update.effective_user
 
-    active = get_creator_active_order(user.id)
+    active = get_creator_active_order(
+        user.id
+    )
 
     if active:
         await update.message.reply_text(
-            f"⚠️ You already have active order "
-            f"#{active['id']}.\n\n"
-            "Open 📋 MY ORDER to edit or cancel it.",
+            f"⚠️ You already have active "
+            f"order #{active['id']}.\n\n"
+            "Use 📋 MY ORDER to change "
+            "or cancel it.",
             reply_markup=main_keyboard(role),
         )
         return
@@ -500,20 +743,39 @@ async def begin_new_order(
         "role": role,
     }
 
-    prompt = (
-        "🚕 <b>NEW TRIP</b>\n\n"
-        "Send the trip details in ONE message.\n\n"
-        "Example:\n"
-        "Larnaca Airport → Limassol\n"
-        "18:30, 2 passengers"
-    )
+    if role == "driver":
+        text = (
+            "🚕 <b>NEW DRIVER TRIP</b>\n\n"
+            "Send all trip information "
+            "in ONE message.\n\n"
+            "Example:\n"
+            "Larnaca Airport → Limassol\n"
+            "23:00\n"
+            "2 passengers\n"
+            "€70"
+        )
+
+    else:
+        text = (
+            "🚕 <b>REQUEST A TAXI</b>\n\n"
+            "Send your trip details "
+            "in ONE message.\n\n"
+            "Example:\n"
+            "Larnaca Airport → Limassol\n"
+            "18:30\n"
+            "2 passengers"
+        )
 
     await update.message.reply_text(
-        prompt,
+        text,
         parse_mode="HTML",
-        reply_markup=cancel_keyboard(role),
+        reply_markup=cancel_keyboard(),
     )
 
+
+# =========================================================
+# SHOW CREATOR ORDER
+# =========================================================
 
 async def show_my_order(
     update,
@@ -521,7 +783,9 @@ async def show_my_order(
     user_id,
     role,
 ):
-    order = get_creator_active_order(user_id)
+    order = get_creator_active_order(
+        user_id
+    )
 
     if not order:
         await update.message.reply_text(
@@ -530,24 +794,41 @@ async def show_my_order(
         )
         return
 
+    if order["status"] == "taken":
+        markup = accepted_creator_keyboard(
+            order
+        )
+    else:
+        markup = creator_manage_keyboard(
+            order
+        )
+
     await update.message.reply_text(
         order_card(order),
         parse_mode="HTML",
-        reply_markup=creator_manage_keyboard(order),
+        reply_markup=markup,
     )
 
+
+# =========================================================
+# SHOW DRIVER'S TAKEN ORDER
+# =========================================================
 
 async def show_taken_order(
     update,
     context,
     user_id,
 ):
-    order = get_taken_order(user_id)
+    order = get_taken_order(
+        user_id
+    )
 
     if not order:
         await update.message.reply_text(
             "📦 You have no accepted order.",
-            reply_markup=main_keyboard("driver"),
+            reply_markup=(
+                main_keyboard("driver")
+            ),
         )
         return
 
@@ -555,9 +836,15 @@ async def show_taken_order(
         "📦 <b>YOUR ACCEPTED ORDER</b>\n\n"
         + order_card(order),
         parse_mode="HTML",
-        reply_markup=give_up_keyboard(order["id"]),
+        reply_markup=(
+            accepted_driver_keyboard(order)
+        ),
     )
 
+
+# =========================================================
+# PRIVATE TEXT
+# =========================================================
 
 async def private_text(
     update: Update,
@@ -570,15 +857,23 @@ async def private_text(
         return
 
     user = update.effective_user
-    text = (update.message.text or "").strip()
+
+    text = (
+        update.message.text
+        or ""
+    ).strip()
 
     role = await role_for(
         user.id,
         context,
     )
 
+    # Cancel current input
     if text == BTN_CANCEL:
-        user_state.pop(user.id, None)
+        user_state.pop(
+            user.id,
+            None,
+        )
 
         await update.message.reply_text(
             "↩️ Cancelled.",
@@ -586,6 +881,7 @@ async def private_text(
         )
         return
 
+    # Client new order
     if text == BTN_NEW_CLIENT:
         await begin_new_order(
             update,
@@ -594,6 +890,7 @@ async def private_text(
         )
         return
 
+    # Driver gives trip to another driver
     if text == BTN_NEW_DRIVER:
         if role != "driver":
             await update.message.reply_text(
@@ -608,6 +905,7 @@ async def private_text(
         )
         return
 
+    # Creator's active order
     if text == BTN_MY_ORDER:
         await show_my_order(
             update,
@@ -617,6 +915,7 @@ async def private_text(
         )
         return
 
+    # Driver's accepted order
     if text == BTN_TAKEN:
         if role == "driver":
             await show_taken_order(
@@ -626,7 +925,9 @@ async def private_text(
             )
         return
 
-    state = user_state.get(user.id)
+    state = user_state.get(
+        user.id
+    )
 
     if not state:
         await update.message.reply_text(
@@ -637,6 +938,10 @@ async def private_text(
 
     action = state["action"]
 
+    # -----------------------------------------
+    # NEW ORDER DETAILS
+    # -----------------------------------------
+
     if action == "new_details":
         if len(text) < 3:
             await update.message.reply_text(
@@ -646,24 +951,35 @@ async def private_text(
 
         state["details"] = text
 
+        # Client: ask price
         if state["role"] == "client":
             state["action"] = "new_price"
 
             await update.message.reply_text(
-                "💶 <b>HOW MUCH ARE YOU WILLING TO PAY?</b>\n\n"
-                "Send the amount in EUR, for example: <b>50</b>\n\n"
-                "or tap <b>SKIP / NOT SURE</b>.",
+                "💶 <b>HOW MUCH ARE YOU "
+                "WILLING TO PAY?</b>\n\n"
+                "Send your offer in EUR.\n"
+                "Example: <b>50</b>\n\n"
+                "If you are not sure, "
+                "tap the button below.",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(
-                    [[
-                        InlineKeyboardButton(
-                            "🤝 SKIP / NOT SURE",
-                            callback_data="skip_new_price",
-                        )
-                    ]]
+                reply_markup=(
+                    InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "🤝 SKIP / NOT SURE",
+                                    callback_data=(
+                                        "skip_new_price"
+                                    ),
+                                )
+                            ]
+                        ]
+                    )
                 ),
             )
 
+        # Driver: publish immediately
         else:
             order_id = await create_order(
                 context,
@@ -678,11 +994,20 @@ async def private_text(
             )
 
             await update.message.reply_text(
-                f"✅ Trip #{order_id} published.",
-                reply_markup=main_keyboard("driver"),
+                "✅ <b>TRIP PUBLISHED</b>\n\n"
+                f"Order #{order_id} is now "
+                "visible in the drivers group.",
+                parse_mode="HTML",
+                reply_markup=(
+                    main_keyboard("driver")
+                ),
             )
 
         return
+
+    # -----------------------------------------
+    # NEW CLIENT PRICE
+    # -----------------------------------------
 
     if action == "new_price":
         cleaned = (
@@ -700,8 +1025,8 @@ async def private_text(
 
         except ValueError:
             await update.message.reply_text(
-                "Please enter a valid amount, "
-                "for example: 50"
+                "Please enter a valid amount.\n"
+                "Example: 50"
             )
             return
 
@@ -721,21 +1046,35 @@ async def private_text(
         )
 
         await update.message.reply_text(
-            "✅ <b>REQUEST SENT</b>\n\n"
-            f"Order #{order_id} is now visible to drivers.",
+            "🔎 <b>LOOKING FOR A DRIVER</b>\n\n"
+            f"Request: #{order_id}\n"
+            f"💶 Your offer: €{price}\n\n"
+            "Your request has been sent "
+            "to our drivers.",
             parse_mode="HTML",
-            reply_markup=main_keyboard("client"),
+            reply_markup=(
+                main_keyboard("client")
+            ),
         )
+
         return
+
+    # -----------------------------------------
+    # EDIT DETAILS
+    # -----------------------------------------
 
     if action == "edit_details":
         order_id = state["order_id"]
-        order = get_order(order_id)
+
+        order = get_order(
+            order_id
+        )
 
         if (
             not order
             or order["creator_id"] != user.id
-            or order["status"] not in ("open", "taken")
+            or order["status"]
+            not in ("open", "taken")
         ):
             user_state.pop(
                 user.id,
@@ -743,7 +1082,11 @@ async def private_text(
             )
 
             await update.message.reply_text(
-                "This order can no longer be edited."
+                "This order can no longer "
+                "be edited.",
+                reply_markup=(
+                    main_keyboard(role)
+                ),
             )
             return
 
@@ -760,6 +1103,7 @@ async def private_text(
                         order_id,
                     ),
                 )
+
                 conn.commit()
 
         await refresh_group_card(
@@ -767,32 +1111,52 @@ async def private_text(
             order_id,
         )
 
+        updated = get_order(
+            order_id
+        )
+
         user_state.pop(
             user.id,
             None,
         )
 
-        order = get_order(order_id)
-
+        # If already taken, notify driver privately.
         if (
-            order["status"] == "taken"
-            and order["taker_id"]
+            updated["status"] == "taken"
+            and updated["taker_id"]
         ):
             try:
                 await context.bot.send_message(
-                    order["taker_id"],
-                    f"⚠️ Order #{order_id} was changed "
-                    "by its creator.\n\n"
-                    f"{text}",
+                    chat_id=updated["taker_id"],
+                    text=(
+                        "⚠️ <b>ORDER UPDATED</b>\n\n"
+                        f"Order #{order_id} was "
+                        "changed by its creator.\n\n"
+                        f"{html.escape(text)}"
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=(
+                        accepted_driver_keyboard(
+                            updated
+                        )
+                    ),
                 )
             except Exception:
-                pass
+                logger.exception(
+                    "Could not notify taker "
+                    "about edit"
+                )
 
         await update.message.reply_text(
             "✅ Order details updated.",
             reply_markup=main_keyboard(role),
         )
+
         return
+
+    # -----------------------------------------
+    # EDIT PRICE
+    # -----------------------------------------
 
     if action == "edit_price":
         order_id = state["order_id"]
@@ -812,17 +1176,21 @@ async def private_text(
 
         except ValueError:
             await update.message.reply_text(
-                "Please enter a valid amount, "
-                "for example: 50"
+                "Please enter a valid amount.\n"
+                "Example: 50"
             )
             return
 
-        order = get_order(order_id)
+        order = get_order(
+            order_id
+        )
 
         if (
             not order
             or order["creator_id"] != user.id
-            or order["status"] not in ("open", "taken")
+            or order["creator_role"] != "client"
+            or order["status"]
+            not in ("open", "taken")
         ):
             user_state.pop(
                 user.id,
@@ -830,7 +1198,11 @@ async def private_text(
             )
 
             await update.message.reply_text(
-                "This order can no longer be edited."
+                "This order can no longer "
+                "be edited.",
+                reply_markup=(
+                    main_keyboard(role)
+                ),
             )
             return
 
@@ -849,11 +1221,16 @@ async def private_text(
                         order_id,
                     ),
                 )
+
                 conn.commit()
 
         await refresh_group_card(
             context,
             order_id,
+        )
+
+        updated = get_order(
+            order_id
         )
 
         user_state.pop(
@@ -862,23 +1239,41 @@ async def private_text(
         )
 
         if (
-            order["status"] == "taken"
-            and order["taker_id"]
+            updated["status"] == "taken"
+            and updated["taker_id"]
         ):
             try:
                 await context.bot.send_message(
-                    order["taker_id"],
-                    f"⚠️ Price for order #{order_id} "
-                    f"was changed to €{price}.",
+                    chat_id=updated["taker_id"],
+                    text=(
+                        "⚠️ <b>PRICE CHANGED</b>\n\n"
+                        f"Order #{order_id}\n"
+                        f"New price: €{price}"
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=(
+                        accepted_driver_keyboard(
+                            updated
+                        )
+                    ),
                 )
             except Exception:
-                pass
+                logger.exception(
+                    "Could not notify driver "
+                    "about price change"
+                )
 
         await update.message.reply_text(
             "✅ Price updated.",
             reply_markup=main_keyboard(role),
         )
 
+        return
+
+
+# =========================================================
+# CALLBACK BUTTONS
+# =========================================================
 
 async def callbacks(
     update: Update,
@@ -893,14 +1288,25 @@ async def callbacks(
         return
 
     user = update.effective_user
-    data = query.data or ""
+
+    data = (
+        query.data
+        or ""
+    )
+
+    # -----------------------------------------
+    # CLIENT SKIPS PRICE
+    # -----------------------------------------
 
     if data == "skip_new_price":
-        state = user_state.get(user.id)
+        state = user_state.get(
+            user.id
+        )
 
         if (
             not state
-            or state.get("action") != "new_price"
+            or state.get("action")
+            != "new_price"
         ):
             await query.answer(
                 "This step has expired.",
@@ -924,19 +1330,35 @@ async def callbacks(
         )
 
         await query.edit_message_text(
-            "✅ <b>REQUEST SENT</b>\n\n"
-            f"Order #{order_id} is now visible to drivers.",
+            "🔎 <b>LOOKING FOR A DRIVER</b>\n\n"
+            f"Request: #{order_id}\n"
+            "💶 Offer: Negotiable\n\n"
+            "Your request has been sent "
+            "to our drivers.",
             parse_mode="HTML",
         )
 
         await context.bot.send_message(
-            user.id,
-            "Use the buttons below for your order.",
-            reply_markup=main_keyboard("client"),
+            chat_id=user.id,
+            text=(
+                "Use the buttons below "
+                "to manage your order."
+            ),
+            reply_markup=(
+                main_keyboard("client")
+            ),
         )
+
         return
 
-    parts = data.split(":", 1)
+    # -----------------------------------------
+    # CALLBACK WITH ORDER ID
+    # -----------------------------------------
+
+    parts = data.split(
+        ":",
+        1,
+    )
 
     if (
         len(parts) != 2
@@ -948,7 +1370,9 @@ async def callbacks(
     action = parts[0]
     order_id = int(parts[1])
 
-    order = get_order(order_id)
+    order = get_order(
+        order_id
+    )
 
     if not order:
         await query.answer(
@@ -956,6 +1380,10 @@ async def callbacks(
             show_alert=True,
         )
         return
+
+    # =====================================================
+    # TAKE ORDER
+    # =====================================================
 
     if action == "take":
         if not await is_driver(
@@ -968,9 +1396,10 @@ async def callbacks(
             )
             return
 
+        # Driver cannot take his own driver-created trip.
         if (
-            order["creator_id"] == user.id
-            and order["creator_role"] == "driver"
+            order["creator_role"] == "driver"
+            and order["creator_id"] == user.id
         ):
             await query.answer(
                 "You cannot take your own trip.",
@@ -991,15 +1420,17 @@ async def callbacks(
 
                 if (
                     not current
-                    or current["status"] != "open"
+                    or current["status"]
+                    != "open"
                 ):
                     await query.answer(
-                        "This trip is no longer available.",
+                        "This trip is no longer "
+                        "available.",
                         show_alert=True,
                     )
                     return
 
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE orders
                     SET status = 'taken',
@@ -1007,7 +1438,7 @@ async def callbacks(
                         taker_name = ?,
                         taker_username = ?
                     WHERE id = ?
-                    AND status = 'open'
+                      AND status = 'open'
                     """,
                     (
                         user.id,
@@ -1016,6 +1447,16 @@ async def callbacks(
                         order_id,
                     ),
                 )
+
+                if cursor.rowcount != 1:
+                    conn.rollback()
+
+                    await query.answer(
+                        "Another driver already "
+                        "took this trip.",
+                        show_alert=True,
+                    )
+                    return
 
                 conn.commit()
 
@@ -1028,53 +1469,116 @@ async def callbacks(
             order_id,
         )
 
-        order = get_order(order_id)
-
-        creator_link = (
-            f'<a href="tg://user?id={order["creator_id"]}">'
-            f'{html.escape(order["creator_name"])}'
-            "</a>"
+        updated = get_order(
+            order_id
         )
 
-        try:
-            await context.bot.send_message(
-                user.id,
-                "✅ <b>YOU ACCEPTED THE ORDER</b>\n\n"
-                f"Order: #{order_id}\n"
-                f"Customer/creator: {creator_link}\n\n"
-                f"{html.escape(order['details'])}",
-                parse_mode="HTML",
-                reply_markup=give_up_keyboard(order_id),
-            )
-        except Exception:
-            pass
-
-        driver_link = (
-            f'<a href="tg://user?id={user.id}">'
-            f"{html.escape(person_name(user))}"
-            "</a>"
-        )
+        # -------------------------------------
+        # MESSAGE TO DRIVER WHO TOOK IT
+        # -------------------------------------
 
         try:
-            await context.bot.send_message(
-                order["creator_id"],
-                "✅ <b>A DRIVER ACCEPTED YOUR ORDER</b>\n\n"
-                f"Order: #{order_id}\n"
-                f"Driver: {driver_link}",
-                parse_mode="HTML",
+            creator_type = (
+                "CUSTOMER"
+                if updated["creator_role"]
+                == "client"
+                else "CREATOR"
             )
+
+            creator_username = ""
+
+            if updated["creator_username"]:
+                creator_username = (
+                    "\nUsername: @"
+                    f"{html.escape(updated['creator_username'])}"
+                )
+
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "✅ <b>YOU ACCEPTED THE ORDER</b>\n\n"
+                    f"🔢 Order: #{order_id}\n"
+                    f"👤 {creator_type}: "
+                    f"{html.escape(updated['creator_name'])}"
+                    f"{creator_username}\n\n"
+                    f"{html.escape(updated['details'])}"
+                ),
+                parse_mode="HTML",
+                reply_markup=(
+                    accepted_driver_keyboard(
+                        updated
+                    )
+                ),
+            )
+
         except Exception:
-            pass
+            logger.exception(
+                "Could not send accepted "
+                "order to driver"
+            )
+
+        # -------------------------------------
+        # MESSAGE TO CREATOR
+        # -------------------------------------
+
+        try:
+            driver_username = ""
+
+            if user.username:
+                driver_username = (
+                    "\nUsername: @"
+                    f"{html.escape(user.username)}"
+                )
+
+            if updated["creator_role"] == "client":
+                title = (
+                    "🚖 <b>DRIVER FOUND</b>"
+                )
+            else:
+                title = (
+                    "✅ <b>YOUR TRIP WAS TAKEN</b>"
+                )
+
+            await context.bot.send_message(
+                chat_id=updated["creator_id"],
+                text=(
+                    f"{title}\n\n"
+                    f"🔢 Order: #{order_id}\n"
+                    f"🚖 Driver: "
+                    f"{html.escape(person_name(user))}"
+                    f"{driver_username}\n\n"
+                    "Tap the button below "
+                    "to contact the driver."
+                ),
+                parse_mode="HTML",
+                reply_markup=(
+                    accepted_creator_keyboard(
+                        updated
+                    )
+                ),
+            )
+
+        except Exception:
+            logger.exception(
+                "Could not notify creator "
+                "about accepted order"
+            )
 
         return
 
-    if action in (
+    # =====================================================
+    # CREATOR-ONLY ACTIONS
+    # =====================================================
+
+    creator_actions = {
         "manage",
         "edit_details",
         "edit_price",
         "cancel_order",
         "confirm_cancel",
-    ):
+    }
+
+    if action in creator_actions:
         if order["creator_id"] != user.id:
             await query.answer(
                 "This is not your order.",
@@ -1082,15 +1586,37 @@ async def callbacks(
             )
             return
 
+    # -----------------------------------------
+    # MANAGE ORDER
+    # -----------------------------------------
+
     if action == "manage":
         await query.answer()
+
+        if order["status"] == "taken":
+            markup = (
+                accepted_creator_keyboard(
+                    order
+                )
+            )
+        else:
+            markup = (
+                creator_manage_keyboard(
+                    order
+                )
+            )
 
         await query.edit_message_text(
             order_card(order),
             parse_mode="HTML",
-            reply_markup=creator_manage_keyboard(order),
+            reply_markup=markup,
         )
+
         return
+
+    # -----------------------------------------
+    # EDIT DETAILS
+    # -----------------------------------------
 
     if action == "edit_details":
         if order["status"] not in (
@@ -1110,26 +1636,30 @@ async def callbacks(
 
         await query.answer()
 
-        role = await role_for(
-            user.id,
-            context,
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "✏️ <b>EDIT ORDER</b>\n\n"
+                f"Send the NEW details "
+                f"for order #{order_id} "
+                "in one message."
+            ),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
         )
 
-        await context.bot.send_message(
-            user.id,
-            f"✏️ Send the NEW details for "
-            f"order #{order_id} in one message.",
-            reply_markup=cancel_keyboard(role),
-        )
         return
+
+    # -----------------------------------------
+    # EDIT PRICE
+    # -----------------------------------------
 
     if action == "edit_price":
         if (
-            order["creator_role"] != "client"
-            or order["status"] not in (
-                "open",
-                "taken",
-            )
+            order["creator_role"]
+            != "client"
+            or order["status"]
+            not in ("open", "taken")
         ):
             await query.answer(
                 "Price cannot be changed.",
@@ -1144,18 +1674,23 @@ async def callbacks(
 
         await query.answer()
 
-        role = await role_for(
-            user.id,
-            context,
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "💶 <b>CHANGE PRICE</b>\n\n"
+                f"Send the NEW price for "
+                f"order #{order_id}.\n"
+                "Example: 50"
+            ),
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
         )
 
-        await context.bot.send_message(
-            user.id,
-            f"💶 Send the NEW price for "
-            f"order #{order_id}. Example: 50",
-            reply_markup=cancel_keyboard(role),
-        )
         return
+
+    # -----------------------------------------
+    # ASK TO CANCEL
+    # -----------------------------------------
 
     if action == "cancel_order":
         if order["status"] not in (
@@ -1171,11 +1706,18 @@ async def callbacks(
         await query.answer()
 
         await query.edit_message_reply_markup(
-            reply_markup=confirm_cancel_keyboard(
-                order_id
+            reply_markup=(
+                confirm_cancel_keyboard(
+                    order_id
+                )
             )
         )
+
         return
+
+    # -----------------------------------------
+    # CONFIRM CANCEL
+    # -----------------------------------------
 
     if action == "confirm_cancel":
         if order["status"] not in (
@@ -1200,6 +1742,7 @@ async def callbacks(
                     """,
                     (order_id,),
                 )
+
                 conn.commit()
 
         await query.answer(
@@ -1215,17 +1758,30 @@ async def callbacks(
             f"❌ Order #{order_id} cancelled."
         )
 
+        # Notify driver if already accepted.
         if taker_id:
             try:
                 await context.bot.send_message(
-                    taker_id,
-                    f"❌ Order #{order_id} was cancelled "
-                    "by its creator.",
+                    chat_id=taker_id,
+                    text=(
+                        "❌ <b>ORDER CANCELLED</b>\n\n"
+                        f"Order #{order_id} was "
+                        "cancelled by its creator."
+                    ),
+                    parse_mode="HTML",
                 )
+
             except Exception:
-                pass
+                logger.exception(
+                    "Could not notify driver "
+                    "about cancellation"
+                )
 
         return
+
+    # =====================================================
+    # TAKER-ONLY ACTIONS
+    # =====================================================
 
     if action in (
         "taken",
@@ -1233,14 +1789,19 @@ async def callbacks(
         "confirm_giveup",
     ):
         if (
-            order["taker_id"] != user.id
-            or order["status"] != "taken"
+            order["status"] != "taken"
+            or order["taker_id"] != user.id
         ):
             await query.answer(
-                "This is no longer your accepted order.",
+                "This is no longer "
+                "your accepted order.",
                 show_alert=True,
             )
             return
+
+    # -----------------------------------------
+    # SHOW TAKEN ORDER
+    # -----------------------------------------
 
     if action == "taken":
         await query.answer()
@@ -1249,21 +1810,35 @@ async def callbacks(
             "📦 <b>YOUR ACCEPTED ORDER</b>\n\n"
             + order_card(order),
             parse_mode="HTML",
-            reply_markup=give_up_keyboard(
-                order_id
+            reply_markup=(
+                accepted_driver_keyboard(
+                    order
+                )
             ),
         )
+
         return
+
+    # -----------------------------------------
+    # ASK DRIVER TO GIVE UP
+    # -----------------------------------------
 
     if action == "giveup":
         await query.answer()
 
         await query.edit_message_reply_markup(
-            reply_markup=confirm_giveup_keyboard(
-                order_id
+            reply_markup=(
+                confirm_giveup_keyboard(
+                    order_id
+                )
             )
         )
+
         return
+
+    # -----------------------------------------
+    # CONFIRM GIVE UP
+    # -----------------------------------------
 
     if action == "confirm_giveup":
         async with db_lock:
@@ -1279,8 +1854,10 @@ async def callbacks(
 
                 if (
                     not current
-                    or current["status"] != "taken"
-                    or current["taker_id"] != user.id
+                    or current["status"]
+                    != "taken"
+                    or current["taker_id"]
+                    != user.id
                 ):
                     await query.answer(
                         "Order state changed.",
@@ -1306,30 +1883,46 @@ async def callbacks(
             "Order returned."
         )
 
+        # Edit existing group card.
+        # No new group message is created.
         await refresh_group_card(
             context,
             order_id,
         )
 
         await query.edit_message_text(
-            f"↩️ Order #{order_id} returned "
-            "to the drivers group."
+            "↩️ <b>ORDER RETURNED</b>\n\n"
+            f"Order #{order_id} is available "
+            "to drivers again.",
+            parse_mode="HTML",
         )
 
+        # Tell creator privately.
         try:
             await context.bot.send_message(
-                order["creator_id"],
-                f"↩️ The driver gave up order "
-                f"#{order_id}.\n"
-                "The order is available to drivers again.",
+                chat_id=order["creator_id"],
+                text=(
+                    "↩️ <b>DRIVER GAVE UP THE ORDER</b>\n\n"
+                    f"Order #{order_id} is available "
+                    "to drivers again."
+                ),
+                parse_mode="HTML",
             )
+
         except Exception:
-            pass
+            logger.exception(
+                "Could not notify creator "
+                "about give up"
+            )
 
         return
 
     await query.answer()
 
+
+# =========================================================
+# DRIVER GROUP TEXT CONTROL
+# =========================================================
 
 async def driver_group_text(
     update: Update,
@@ -1341,17 +1934,28 @@ async def driver_group_text(
     if not update.message:
         return
 
+    # Admins may write normally.
     if await is_admin(
         update.effective_user.id,
         context,
     ):
         return
 
+    # Backup protection:
+    # ordinary driver messages are deleted.
+    #
+    # Later we will also disable sending messages
+    # for ordinary members in Telegram group settings.
     try:
         await update.message.delete()
+
     except Exception:
         pass
 
+
+# =========================================================
+# ERROR HANDLER
+# =========================================================
 
 async def error_handler(
     update: object,
@@ -1362,6 +1966,10 @@ async def error_handler(
         exc_info=context.error,
     )
 
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
     if not TOKEN:
@@ -1409,7 +2017,9 @@ def main():
 
     app.add_handler(
         MessageHandler(
-            filters.Chat(DRIVERS_GROUP_ID)
+            filters.Chat(
+                DRIVERS_GROUP_ID
+            )
             & filters.TEXT
             & ~filters.COMMAND,
             driver_group_text,
