@@ -27,9 +27,17 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 
+# Driver group
 DRIVERS_GROUP_ID = -1004449292276
+
+# Public client group: CYPRUS TAXI
+CLIENTS_GROUP_ID = -1004401199110
+
 BOT_USERNAME = "CyprusDriversOrdersBot"
+
+# Railway persistent volume
 DB_PATH = os.getenv("DB_PATH", "/data/orders.db")
+
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -46,7 +54,7 @@ user_state = {}
 
 
 # =========================================================
-# BUTTONS
+# BUTTON TEXT
 # =========================================================
 
 BTN_NEW_DRIVER = "🚕 ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ"
@@ -197,10 +205,10 @@ async def is_driver(user_id, context):
         return False
 
 
-async def is_admin(user_id, context):
+async def is_admin_in_chat(chat_id, user_id, context):
     try:
         member = await context.bot.get_chat_member(
-            DRIVERS_GROUP_ID,
+            chat_id,
             user_id,
         )
 
@@ -211,6 +219,14 @@ async def is_admin(user_id, context):
 
     except Exception:
         return False
+
+
+async def is_admin(user_id, context):
+    return await is_admin_in_chat(
+        DRIVERS_GROUP_ID,
+        user_id,
+        context,
+    )
 
 
 async def role_for(user_id, context):
@@ -258,7 +274,7 @@ def cancel_keyboard():
 
 
 # =========================================================
-# PERMANENT DRIVER GROUP BUTTON
+# GROUP PERMANENT KEYBOARDS
 # =========================================================
 
 def driver_group_keyboard():
@@ -268,6 +284,16 @@ def driver_group_keyboard():
         is_persistent=True,
         selective=False,
         input_field_placeholder="Νέα διαδρομή...",
+    )
+
+
+def client_group_keyboard():
+    return ReplyKeyboardMarkup(
+        [[BTN_NEW_CLIENT]],
+        resize_keyboard=True,
+        is_persistent=True,
+        selective=False,
+        input_field_placeholder="Request a taxi...",
     )
 
 
@@ -581,9 +607,8 @@ async def create_order(
         order_id
     )
 
-    # ONLY THE FINISHED ORDER IS POSTED TO THE GROUP.
-    # This is the actual group notification.
-
+    # ONLY THE FINISHED ORDER IS POSTED
+    # TO THE DRIVER GROUP.
     message = await context.bot.send_message(
         chat_id=DRIVERS_GROUP_ID,
         text=order_card(order),
@@ -650,11 +675,13 @@ async def begin_new_order(
 
         text = (
             "🚕 <b>REQUEST A TAXI</b>\n\n"
-            "Send all trip details in ONE message.\n\n"
-            "Example:\n"
+            "Please send all your trip details "
+            "in ONE message.\n\n"
+            "Example:\n\n"
             "Larnaca Airport → Limassol\n"
             "18:30\n"
-            "2 passengers"
+            "2 passengers\n\n"
+            "👇 Send your trip details now."
         )
 
     await context.bot.send_message(
@@ -680,16 +707,7 @@ async def start(
     if not update.effective_chat:
         return
 
-    # /start inside driver group
-    if update.effective_chat.id == DRIVERS_GROUP_ID:
-
-        try:
-            await update.effective_message.delete()
-        except Exception:
-            pass
-
-        return
-
+    # Do not use /start inside groups
     if update.effective_chat.type != "private":
 
         try:
@@ -702,13 +720,13 @@ async def start(
     payload = ""
 
     if context.args:
-
         payload = (
             context.args[0]
             .strip()
             .lower()
         )
 
+    # Deep link for driver
     if payload == "driver":
 
         allowed = await is_driver(
@@ -738,6 +756,7 @@ async def start(
 
         return
 
+    # Deep link for client
     if payload == "client":
 
         user_state.pop(
@@ -779,8 +798,9 @@ async def start(
 
         text = (
             "🚕 <b>CYPRUS TAXI</b>\n\n"
-            "Need a taxi?\n"
-            "Tap <b>REQUEST A TAXI</b>."
+            "Need a taxi in Cyprus?\n\n"
+            "👇 Tap <b>🚕 REQUEST A TAXI</b>\n"
+            "and send us your trip details."
         )
 
     await update.message.reply_text(
@@ -793,8 +813,15 @@ async def start(
 
 # =========================================================
 # /PANEL
-# Activates permanent group keyboard.
-# Admin only.
+#
+# Run /panel once in each group.
+#
+# Driver group:
+# installs permanent driver button.
+#
+# Client group:
+# installs public client welcome button
+# + permanent bottom REQUEST A TAXI button.
 # =========================================================
 
 async def panel_command(
@@ -807,11 +834,18 @@ async def panel_command(
     if not update.effective_chat:
         return
 
-    if update.effective_chat.id != DRIVERS_GROUP_ID:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if chat_id not in (
+        DRIVERS_GROUP_ID,
+        CLIENTS_GROUP_ID,
+    ):
         return
 
-    if not await is_admin(
-        update.effective_user.id,
+    if not await is_admin_in_chat(
+        chat_id,
+        user_id,
         context,
     ):
 
@@ -827,17 +861,92 @@ async def panel_command(
     except Exception:
         pass
 
-    await context.bot.send_message(
-        chat_id=DRIVERS_GROUP_ID,
-        text=(
-            "🚕 <b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>\n\n"
-            "Το κουμπί είναι ενεργό "
-            "στο κάτω μέρος της ομάδας."
-        ),
-        parse_mode="HTML",
-        reply_markup=driver_group_keyboard(),
-        disable_notification=True,
-    )
+    # =====================================================
+    # DRIVER GROUP PANEL
+    # =====================================================
+
+    if chat_id == DRIVERS_GROUP_ID:
+
+        await context.bot.send_message(
+            chat_id=DRIVERS_GROUP_ID,
+            text=(
+                "🚕 <b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>\n\n"
+                "Για να δώσεις νέα διαδρομή, "
+                "πάτησε το κουμπί στο κάτω μέρος."
+            ),
+            parse_mode="HTML",
+            reply_markup=driver_group_keyboard(),
+            disable_notification=True,
+        )
+
+        return
+
+    # =====================================================
+    # CLIENT GROUP PANEL
+    # =====================================================
+
+    if chat_id == CLIENTS_GROUP_ID:
+
+        # Public welcome message.
+        # This button works even for a brand-new client
+        # who has NEVER started the bot before.
+        welcome_message = await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID,
+            text=(
+                "🚕 <b>CYPRUS TAXI</b>\n\n"
+                "Need a taxi in Cyprus?\n\n"
+                "Airport transfers • City rides • "
+                "Long-distance trips\n\n"
+                "👇 <b>Tap the button below to request a taxi.</b>\n\n"
+                "Your request will be sent privately "
+                "to available drivers."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🚕 OPEN BOT & REQUEST TAXI",
+                            url=(
+                                f"https://t.me/"
+                                f"{BOT_USERNAME}"
+                                f"?start=client"
+                            ),
+                        )
+                    ]
+                ]
+            ),
+            disable_notification=True,
+        )
+
+        # Try to pin the welcome message.
+        # If bot does not have pin permission,
+        # nothing breaks.
+        try:
+            await context.bot.pin_chat_message(
+                chat_id=CLIENTS_GROUP_ID,
+                message_id=welcome_message.message_id,
+                disable_notification=True,
+            )
+        except Exception:
+            logger.info(
+                "Could not pin client welcome message"
+            )
+
+        # Install persistent bottom keyboard.
+        await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID,
+            text=(
+                "🚕 <b>REQUEST A TAXI</b>\n\n"
+                "You can also use the permanent "
+                "button below."
+            ),
+            parse_mode="HTML",
+            reply_markup=client_group_keyboard(),
+            disable_notification=True,
+        )
+
+        return
 
 
 # =========================================================
@@ -1040,11 +1149,24 @@ async def private_text(
         context,
     )
 
+    # =====================================================
     # CANCEL
+    # =====================================================
+
     if text in (
         BTN_CANCEL,
         OLD_CANCEL,
     ):
+
+        state = user_state.get(user.id)
+
+        if state:
+            state_role = state.get(
+                "role",
+                role,
+            )
+        else:
+            state_role = role
 
         user_state.pop(
             user.id,
@@ -1053,20 +1175,25 @@ async def private_text(
 
         msg = (
             "↩️ Ακυρώθηκε."
-            if role == "driver"
+            if state_role == "driver"
             else
             "↩️ Cancelled."
         )
 
         await update.message.reply_text(
             msg,
-            reply_markup=main_keyboard(role),
+            reply_markup=main_keyboard(
+                state_role
+            ),
             disable_notification=True,
         )
 
         return
 
+    # =====================================================
     # NEW DRIVER ORDER
+    # =====================================================
+
     if text in (
         BTN_NEW_DRIVER,
         OLD_NEW_DRIVER,
@@ -1089,7 +1216,10 @@ async def private_text(
 
         return
 
+    # =====================================================
     # NEW CLIENT ORDER
+    # =====================================================
+
     if text == BTN_NEW_CLIENT:
 
         await begin_new_order(
@@ -1100,7 +1230,10 @@ async def private_text(
 
         return
 
+    # =====================================================
     # MY ORDERS
+    # =====================================================
+
     if text in (
         BTN_MY_ORDERS,
         OLD_MY_ORDER,
@@ -1116,7 +1249,10 @@ async def private_text(
 
         return
 
+    # =====================================================
     # TAKEN ORDERS
+    # =====================================================
+
     if text in (
         BTN_TAKEN,
         OLD_TAKEN,
@@ -1143,7 +1279,7 @@ async def private_text(
             "👇 Χρησιμοποίησε τα κουμπιά παρακάτω."
             if role == "driver"
             else
-            "Please use the buttons below."
+            "👇 Please use the buttons below."
         )
 
         await update.message.reply_text(
@@ -1155,6 +1291,10 @@ async def private_text(
         return
 
     action = state["action"]
+    state_role = state.get(
+        "role",
+        role,
+    )
 
     # =====================================================
     # NEW DETAILS
@@ -1167,7 +1307,7 @@ async def private_text(
             await update.message.reply_text(
                 (
                     "Γράψε τα στοιχεία της διαδρομής."
-                    if role == "driver"
+                    if state_role == "driver"
                     else
                     "Please send the trip details."
                 ),
@@ -1178,7 +1318,7 @@ async def private_text(
 
         state["details"] = text
 
-        if state["role"] == "client":
+        if state_role == "client":
 
             state["action"] = "new_price"
 
@@ -1284,7 +1424,9 @@ async def private_text(
             f"Request: #{order_id}\n"
             f"💶 Your offer: €{price}\n\n"
             "Your request has been sent "
-            "to our drivers.",
+            "to our drivers.\n\n"
+            "You will be notified when "
+            "a driver accepts your trip.",
             parse_mode="HTML",
             reply_markup=main_keyboard(
                 "client"
@@ -1593,7 +1735,9 @@ async def callbacks(
             f"Request: #{order_id}\n"
             "💶 Offer: Negotiable\n\n"
             "Your request has been sent "
-            "to our drivers.",
+            "to our drivers.\n\n"
+            "You will be notified when "
+            "a driver accepts your trip.",
             parse_mode="HTML",
         )
 
@@ -1738,6 +1882,7 @@ async def callbacks(
             order_id
         )
 
+        # Message to driver
         try:
 
             await context.bot.send_message(
@@ -1764,16 +1909,32 @@ async def callbacks(
                 "Could not message taker"
             )
 
+        # Message to creator/client
         try:
 
-            await context.bot.send_message(
-                chat_id=updated["creator_id"],
-                text=(
+            if updated["creator_role"] == "client":
+
+                creator_text = (
+                    "✅ <b>DRIVER FOUND!</b>\n\n"
+                    f"🚕 Request: #{order_id}\n"
+                    f"👤 Driver: "
+                    f"{html.escape(person_name(user))}\n\n"
+                    "Your driver has accepted "
+                    "your trip."
+                )
+
+            else:
+
+                creator_text = (
                     "✅ <b>Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ</b>\n\n"
                     f"🔢 Αριθμός: #{order_id}\n"
                     f"🚖 Οδηγός: "
                     f"{html.escape(person_name(user))}"
-                ),
+                )
+
+            await context.bot.send_message(
+                chat_id=updated["creator_id"],
+                text=creator_text,
                 parse_mode="HTML",
                 reply_markup=(
                     accepted_creator_keyboard(
@@ -1868,6 +2029,13 @@ async def callbacks(
         await context.bot.send_message(
             chat_id=user.id,
             text=(
+                "✏️ <b>CHANGE TRIP DETAILS</b>\n\n"
+                f"Send the NEW details "
+                f"for order #{order_id} "
+                "in one message."
+            )
+            if order["creator_role"] == "client"
+            else (
                 "✏️ <b>ΑΛΛΑΓΗ ΣΤΟΙΧΕΙΩΝ</b>\n\n"
                 f"Στείλε τα ΝΕΑ στοιχεία "
                 f"για τη διαδρομή #{order_id} "
@@ -1987,6 +2155,9 @@ async def callbacks(
                 conn.commit()
 
         await query.answer(
+            "Order cancelled."
+            if order["creator_role"] == "client"
+            else
             "Η διαδρομή ακυρώθηκε."
         )
 
@@ -1995,9 +2166,17 @@ async def callbacks(
             order_id,
         )
 
-        await query.edit_message_text(
-            f"❌ Η διαδρομή #{order_id} ακυρώθηκε."
-        )
+        if order["creator_role"] == "client":
+
+            await query.edit_message_text(
+                f"❌ Request #{order_id} cancelled."
+            )
+
+        else:
+
+            await query.edit_message_text(
+                f"❌ Η διαδρομή #{order_id} ακυρώθηκε."
+            )
 
         if taker_id:
 
@@ -2146,14 +2325,28 @@ async def callbacks(
 
         try:
 
-            await context.bot.send_message(
-                chat_id=order["creator_id"],
-                text=(
+            if order["creator_role"] == "client":
+
+                creator_text = (
+                    "🔎 <b>LOOKING FOR ANOTHER DRIVER</b>\n\n"
+                    f"Your driver released "
+                    f"request #{order_id}.\n\n"
+                    "Your request is available "
+                    "to our drivers again."
+                )
+
+            else:
+
+                creator_text = (
                     "↩️ <b>Η ΔΙΑΔΡΟΜΗ ΕΙΝΑΙ "
                     "ΞΑΝΑ ΔΙΑΘΕΣΙΜΗ</b>\n\n"
                     f"Ο οδηγός άφησε τη "
                     f"διαδρομή #{order_id}."
-                ),
+                )
+
+            await context.bot.send_message(
+                chat_id=order["creator_id"],
+                text=creator_text,
                 parse_mode="HTML",
                 disable_notification=True,
             )
@@ -2170,7 +2363,7 @@ async def callbacks(
 
 
 # =========================================================
-# DRIVER GROUP
+# DRIVER GROUP HANDLER
 # =========================================================
 
 async def driver_group_text(
@@ -2190,38 +2383,25 @@ async def driver_group_text(
         or ""
     ).strip()
 
-    # =====================================================
-    # PERMANENT GROUP BUTTON
-    # =====================================================
-
+    # Permanent driver button
     if text in (
         BTN_NEW_DRIVER,
         OLD_NEW_DRIVER,
     ):
 
-        # Telegram ReplyKeyboard technically sends this
-        # button text into the group first.
-        # Delete it immediately.
+        # Delete technical button message immediately.
         try:
             await update.message.delete()
         except Exception:
             pass
 
-        # Only actual members of driver group
-        # may start a driver order.
         if not await is_driver(
             user.id,
             context,
         ):
             return
 
-        # IMPORTANT:
-        # From this moment NOTHING ELSE is posted
-        # to the driver group.
-        #
-        # All instructions go directly to the driver's
-        # private chat with the bot.
-
+        # Everything continues PRIVATELY.
         try:
 
             await begin_new_order(
@@ -2232,38 +2412,148 @@ async def driver_group_text(
 
         except Exception:
 
-            # Telegram will reject a private message
-            # if this user has never opened/started
-            # the bot privately.
             user_state.pop(
                 user.id,
                 None,
             )
 
             logger.exception(
-                "Could not start private order flow "
+                "Could not start private driver flow "
                 "for driver %s",
                 user.id,
             )
 
         return
 
+    # Admins may write normally.
+    if await is_admin_in_chat(
+        DRIVERS_GROUP_ID,
+        user.id,
+        context,
+    ):
+        return
+
+    # Delete ordinary driver messages.
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+
+# =========================================================
+# CLIENT GROUP HANDLER
+# =========================================================
+
+async def client_group_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not update.effective_user:
+        return
+
+    if not update.message:
+        return
+
+    user = update.effective_user
+
+    text = (
+        update.message.text
+        or ""
+    ).strip()
+
     # =====================================================
-    # ADMINS MAY WRITE NORMAL GROUP MESSAGES
+    # PERMANENT REQUEST A TAXI BUTTON
     # =====================================================
 
-    if await is_admin(
+    if text == BTN_NEW_CLIENT:
+
+        # Delete technical button message immediately
+        # so the public client group stays clean.
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        # From this point everything goes privately.
+        try:
+
+            await begin_new_order(
+                update,
+                context,
+                "client",
+            )
+
+        except Exception:
+
+            # Most common reason:
+            # brand-new user has never started the bot.
+            #
+            # We deliberately do NOT post an error
+            # into the public group.
+            user_state.pop(
+                user.id,
+                None,
+            )
+
+            logger.info(
+                "Could not privately message client %s. "
+                "They probably need to open/start the bot first.",
+                user.id,
+            )
+
+        return
+
+    # =====================================================
+    # ADMINS MAY WRITE NORMALLY
+    # =====================================================
+
+    if await is_admin_in_chat(
+        CLIENTS_GROUP_ID,
         user.id,
         context,
     ):
         return
 
     # =====================================================
-    # ORDINARY DRIVER TEXT IS REMOVED
+    # ORDINARY CLIENT MESSAGES ARE REMOVED
     # =====================================================
 
     try:
         await update.message.delete()
+    except Exception:
+        pass
+
+
+# =========================================================
+# GROUP COMMAND CLEANUP
+# =========================================================
+
+async def group_commands_cleanup(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not update.effective_chat:
+        return
+
+    if update.effective_chat.id not in (
+        DRIVERS_GROUP_ID,
+        CLIENTS_GROUP_ID,
+    ):
+        return
+
+    if not update.effective_user:
+        return
+
+    # Admin commands are handled separately.
+    if await is_admin_in_chat(
+        update.effective_chat.id,
+        update.effective_user.id,
+        context,
+    ):
+        return
+
+    try:
+        await update.effective_message.delete()
     except Exception:
         pass
 
@@ -2303,6 +2593,7 @@ def main():
         .build()
     )
 
+    # Commands
     app.add_handler(
         CommandHandler(
             "start",
@@ -2324,13 +2615,14 @@ def main():
         )
     )
 
+    # Inline buttons
     app.add_handler(
         CallbackQueryHandler(
             callbacks
         )
     )
 
-    # Private messages
+    # Private bot messages
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE
@@ -2340,7 +2632,7 @@ def main():
         )
     )
 
-    # Driver group messages
+    # Driver group
     app.add_handler(
         MessageHandler(
             filters.Chat(
@@ -2349,6 +2641,35 @@ def main():
             & filters.TEXT
             & ~filters.COMMAND,
             driver_group_text,
+        )
+    )
+
+    # Client group
+    app.add_handler(
+        MessageHandler(
+            filters.Chat(
+                CLIENTS_GROUP_ID
+            )
+            & filters.TEXT
+            & ~filters.COMMAND,
+            client_group_text,
+        )
+    )
+
+    # Clean non-admin commands from our groups
+    app.add_handler(
+        MessageHandler(
+            (
+                filters.Chat(
+                    DRIVERS_GROUP_ID
+                )
+                |
+                filters.Chat(
+                    CLIENTS_GROUP_ID
+                )
+            )
+            & filters.COMMAND,
+            group_commands_cleanup,
         )
     )
 
