@@ -85,6 +85,23 @@ async def is_admin(context, user_id):
 
 
 # =========================================================
+# /ID
+# Показывает ID текущего чата/группы
+# =========================================================
+
+async def show_id(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not update.message:
+        return
+
+    await update.message.reply_text(
+        f"Chat ID: {update.effective_chat.id}"
+    )
+
+
+# =========================================================
 # /START
 # =========================================================
 
@@ -562,6 +579,15 @@ def main():
         CommandHandler(
             "start",
             start,
+        )
+    )
+
+
+    # Команда для получения ID любой группы
+    app.add_handler(
+        CommandHandler(
+            "id",
+            show_id,
         )
     )
 
