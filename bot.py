@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 db_lock = asyncio.Lock()
 
-# Temporary state for conversations.
-# Orders themselves are stored permanently in SQLite.
+# Only temporary conversation steps are stored here.
+# Orders themselves are permanently stored in SQLite.
 user_state = {}
 
 
@@ -51,8 +51,8 @@ user_state = {}
 
 BTN_NEW_DRIVER = "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ"
 BTN_NEW_CLIENT = "🚕 REQUEST A TAXI"
-BTN_MY_ORDER = "📋 MY ORDER"
-BTN_TAKEN = "📦 MY TAKEN ORDER"
+BTN_MY_ORDERS = "📋 MY ORDERS"
+BTN_TAKEN = "📦 MY TAKEN ORDERS"
 BTN_CANCEL = "❌ CANCEL"
 
 
@@ -122,7 +122,7 @@ def get_order(order_id):
         ).fetchone()
 
 
-def get_creator_active_order(user_id):
+def get_creator_active_orders(user_id):
     with db() as conn:
         return conn.execute(
             """
@@ -131,13 +131,12 @@ def get_creator_active_order(user_id):
             WHERE creator_id = ?
               AND status IN ('open', 'taken')
             ORDER BY id DESC
-            LIMIT 1
             """,
             (user_id,),
-        ).fetchone()
+        ).fetchall()
 
 
-def get_taken_order(user_id):
+def get_taken_orders(user_id):
     with db() as conn:
         return conn.execute(
             """
@@ -146,10 +145,9 @@ def get_taken_order(user_id):
             WHERE taker_id = ?
               AND status = 'taken'
             ORDER BY id DESC
-            LIMIT 1
             """,
             (user_id,),
-        ).fetchone()
+        ).fetchall()
 
 
 # =========================================================
@@ -226,7 +224,7 @@ def main_keyboard(role):
             [
                 [BTN_NEW_DRIVER],
                 [
-                    BTN_MY_ORDER,
+                    BTN_MY_ORDERS,
                     BTN_TAKEN,
                 ],
             ],
@@ -237,7 +235,7 @@ def main_keyboard(role):
     return ReplyKeyboardMarkup(
         [
             [BTN_NEW_CLIENT],
-            [BTN_MY_ORDER],
+            [BTN_MY_ORDERS],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -574,8 +572,12 @@ async def create_order(
         order_id
     )
 
-    # Only the finished order is sent to the drivers group.
-    # This is intentionally a normal notification.
+    # IMPORTANT:
+    # This is the ONLY new message sent to the drivers group
+    # when an order is created.
+    #
+    # It is the completed order and it is sent with
+    # normal Telegram notification enabled.
     message = await context.bot.send_message(
         chat_id=DRIVERS_GROUP_ID,
         text=order_card(order),
@@ -618,26 +620,11 @@ async def begin_new_order(
 ):
     user = update.effective_user
 
-    active = get_creator_active_order(
-        user.id
-    )
-
-    if active:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=(
-                "⚠️ <b>YOU ALREADY HAVE "
-                "AN ACTIVE ORDER</b>\n\n"
-                f"Order: #{active['id']}\n\n"
-                "Use 📋 MY ORDER to change "
-                "or cancel it before creating "
-                "another one."
-            ),
-            parse_mode="HTML",
-            reply_markup=main_keyboard(role),
-        )
-        return
-
+    # IMPORTANT:
+    # We DO NOT block the user if they already have
+    # another active order.
+    #
+    # One driver/client can create multiple orders.
     user_state[user.id] = {
         "action": "new_details",
         "role": role,
@@ -671,6 +658,7 @@ async def begin_new_order(
         text=text,
         parse_mode="HTML",
         reply_markup=cancel_keyboard(),
+        disable_notification=True,
     )
 
 
@@ -688,7 +676,6 @@ async def start(
     if not update.effective_chat:
         return
 
-    # No normal /start workflow inside groups.
     if update.effective_chat.type != "private":
         try:
             await update.effective_message.delete()
@@ -706,7 +693,6 @@ async def start(
             .lower()
         )
 
-    # Driver pressed the big button in the drivers group.
     if payload == "driver":
         allowed = await is_driver(
             update.effective_user.id,
@@ -732,7 +718,6 @@ async def start(
         )
         return
 
-    # Client deep link.
     if payload == "client":
         user_state.pop(
             update.effective_user.id,
@@ -746,7 +731,6 @@ async def start(
         )
         return
 
-    # Normal private /start.
     role = await role_for(
         update.effective_user.id,
         context,
@@ -762,8 +746,8 @@ async def start(
             "🚕 <b>DRIVER MENU</b>\n\n"
             "To give a trip to another driver, "
             "tap <b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>.\n\n"
-            "To take an available trip, "
-            "use the drivers group."
+            "You can create several active "
+            "trips at the same time."
         )
 
     else:
@@ -777,12 +761,12 @@ async def start(
         text,
         parse_mode="HTML",
         reply_markup=main_keyboard(role),
+        disable_notification=True,
     )
 
 
 # =========================================================
 # /PANEL
-# ADMIN USES THIS ONCE IN THE DRIVERS GROUP
 # =========================================================
 
 async def panel_command(
@@ -812,7 +796,6 @@ async def panel_command(
 
         return
 
-    # Remove the /panel command itself.
     try:
         await update.effective_message.delete()
     except Exception:
@@ -831,14 +814,9 @@ async def panel_command(
         ),
         parse_mode="HTML",
         reply_markup=driver_panel_keyboard(),
-
-        # Creating the panel itself should not make
-        # a notification sound for everyone.
         disable_notification=True,
     )
 
-    # Try to pin the panel automatically.
-    # Bot must have permission to pin messages.
     try:
         await context.bot.pin_chat_message(
             chat_id=DRIVERS_GROUP_ID,
@@ -867,71 +845,127 @@ async def id_command(
 
 
 # =========================================================
-# SHOW CREATOR'S ORDER
+# MY ORDERS LIST
 # =========================================================
 
-async def show_my_order(
+async def show_my_orders(
     update,
     context,
     user_id,
     role,
 ):
-    order = get_creator_active_order(
+    orders = get_creator_active_orders(
         user_id
     )
 
-    if not order:
+    if not orders:
         await update.message.reply_text(
-            "📋 You have no active order.",
+            "📋 You have no active orders.",
             reply_markup=main_keyboard(role),
+            disable_notification=True,
         )
         return
 
-    if order["status"] == "taken":
-        markup = accepted_creator_keyboard(
-            order
+    buttons = []
+
+    for order in orders:
+        if order["status"] == "taken":
+            status = "✅"
+        else:
+            status = "🟢"
+
+        short_details = (
+            order["details"]
+            .replace("\n", " ")
+            .strip()
         )
-    else:
-        markup = creator_manage_keyboard(
-            order
+
+        if len(short_details) > 28:
+            short_details = (
+                short_details[:28] + "…"
+            )
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    f"{status} #{order['id']} — "
+                    f"{short_details}",
+                    callback_data=(
+                        f"manage:{order['id']}"
+                    ),
+                )
+            ]
         )
 
     await update.message.reply_text(
-        order_card(order),
+        "📋 <b>MY ORDERS</b>\n\n"
+        "Choose the order you want "
+        "to manage:",
         parse_mode="HTML",
-        reply_markup=markup,
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        ),
+        disable_notification=True,
     )
 
 
 # =========================================================
-# SHOW TAKEN ORDER
+# TAKEN ORDERS LIST
 # =========================================================
 
-async def show_taken_order(
+async def show_taken_orders(
     update,
     context,
     user_id,
 ):
-    order = get_taken_order(
+    orders = get_taken_orders(
         user_id
     )
 
-    if not order:
+    if not orders:
         await update.message.reply_text(
-            "📦 You have no accepted order.",
+            "📦 You have no accepted orders.",
             reply_markup=main_keyboard(
                 "driver"
             ),
+            disable_notification=True,
         )
         return
 
+    buttons = []
+
+    for order in orders:
+        short_details = (
+            order["details"]
+            .replace("\n", " ")
+            .strip()
+        )
+
+        if len(short_details) > 28:
+            short_details = (
+                short_details[:28] + "…"
+            )
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    f"🚖 #{order['id']} — "
+                    f"{short_details}",
+                    callback_data=(
+                        f"taken:{order['id']}"
+                    ),
+                )
+            ]
+        )
+
     await update.message.reply_text(
-        "📦 <b>YOUR ACCEPTED ORDER</b>\n\n"
-        + order_card(order),
+        "📦 <b>MY TAKEN ORDERS</b>\n\n"
+        "Choose an order:",
         parse_mode="HTML",
-        reply_markup=accepted_driver_keyboard(
-            order
+        reply_markup=InlineKeyboardMarkup(
+            buttons
         ),
+        disable_notification=True,
     )
 
 
@@ -961,7 +995,6 @@ async def private_text(
         context,
     )
 
-    # Cancel current operation.
     if text == BTN_CANCEL:
         user_state.pop(
             user.id,
@@ -971,10 +1004,10 @@ async def private_text(
         await update.message.reply_text(
             "↩️ Cancelled.",
             reply_markup=main_keyboard(role),
+            disable_notification=True,
         )
         return
 
-    # Client creates taxi request.
     if text == BTN_NEW_CLIENT:
         await begin_new_order(
             update,
@@ -983,11 +1016,11 @@ async def private_text(
         )
         return
 
-    # Driver gives trip to another driver.
     if text == BTN_NEW_DRIVER:
         if role != "driver":
             await update.message.reply_text(
-                "⛔ Driver access only."
+                "⛔ Driver access only.",
+                disable_notification=True,
             )
             return
 
@@ -998,9 +1031,8 @@ async def private_text(
         )
         return
 
-    # Creator manages active order.
-    if text == BTN_MY_ORDER:
-        await show_my_order(
+    if text == BTN_MY_ORDERS:
+        await show_my_orders(
             update,
             context,
             user.id,
@@ -1008,10 +1040,9 @@ async def private_text(
         )
         return
 
-    # Driver manages accepted order.
     if text == BTN_TAKEN:
         if role == "driver":
-            await show_taken_order(
+            await show_taken_orders(
                 update,
                 context,
                 user.id,
@@ -1026,6 +1057,7 @@ async def private_text(
         await update.message.reply_text(
             "Please use the buttons below.",
             reply_markup=main_keyboard(role),
+            disable_notification=True,
         )
         return
 
@@ -1038,13 +1070,13 @@ async def private_text(
     if action == "new_details":
         if len(text) < 3:
             await update.message.reply_text(
-                "Please send the trip details."
+                "Please send the trip details.",
+                disable_notification=True,
             )
             return
 
         state["details"] = text
 
-        # Client must now enter price.
         if state["role"] == "client":
             state["action"] = "new_price"
 
@@ -1068,9 +1100,9 @@ async def private_text(
                         ]
                     ]
                 ),
+                disable_notification=True,
             )
 
-        # Driver trip is ready immediately.
         else:
             order_id = await create_order(
                 context,
@@ -1088,11 +1120,14 @@ async def private_text(
                 "✅ <b>Η ΔΙΑΔΡΟΜΗ "
                 "ΔΗΜΟΣΙΕΥΤΗΚΕ</b>\n\n"
                 f"Order #{order_id} is now "
-                "visible in the drivers group.",
+                "visible in the drivers group.\n\n"
+                "You can immediately create "
+                "another order if needed.",
                 parse_mode="HTML",
                 reply_markup=main_keyboard(
                     "driver"
                 ),
+                disable_notification=True,
             )
 
         return
@@ -1118,7 +1153,8 @@ async def private_text(
         except ValueError:
             await update.message.reply_text(
                 "Please enter a valid amount.\n"
-                "Example: 50"
+                "Example: 50",
+                disable_notification=True,
             )
             return
 
@@ -1147,6 +1183,7 @@ async def private_text(
             reply_markup=main_keyboard(
                 "client"
             ),
+            disable_notification=True,
         )
 
         return
@@ -1174,6 +1211,7 @@ async def private_text(
                 "This order can no longer "
                 "be edited.",
                 reply_markup=main_keyboard(role),
+                disable_notification=True,
             )
             return
 
@@ -1193,6 +1231,8 @@ async def private_text(
 
                 conn.commit()
 
+        # Edit existing group message.
+        # No new group message = no new group notification.
         await refresh_group_card(
             context,
             order_id,
@@ -1207,8 +1247,6 @@ async def private_text(
             None,
         )
 
-        # If somebody already took it,
-        # tell that driver privately.
         if (
             updated["status"] == "taken"
             and updated["taker_id"]
@@ -1228,6 +1266,7 @@ async def private_text(
                             updated
                         )
                     ),
+                    disable_notification=True,
                 )
 
             except Exception:
@@ -1239,6 +1278,7 @@ async def private_text(
         await update.message.reply_text(
             "✅ Order details updated.",
             reply_markup=main_keyboard(role),
+            disable_notification=True,
         )
 
         return
@@ -1266,7 +1306,8 @@ async def private_text(
         except ValueError:
             await update.message.reply_text(
                 "Please enter a valid amount.\n"
-                "Example: 50"
+                "Example: 50",
+                disable_notification=True,
             )
             return
 
@@ -1290,6 +1331,7 @@ async def private_text(
                 "This order can no longer "
                 "be edited.",
                 reply_markup=main_keyboard(role),
+                disable_notification=True,
             )
             return
 
@@ -1343,6 +1385,7 @@ async def private_text(
                             updated
                         )
                     ),
+                    disable_notification=True,
                 )
 
             except Exception:
@@ -1354,6 +1397,7 @@ async def private_text(
         await update.message.reply_text(
             "✅ Price updated.",
             reply_markup=main_keyboard(role),
+            disable_notification=True,
         )
 
         return
@@ -1426,11 +1470,12 @@ async def callbacks(
             chat_id=user.id,
             text=(
                 "Use the buttons below "
-                "to manage your order."
+                "to manage your orders."
             ),
             reply_markup=main_keyboard(
                 "client"
             ),
+            disable_notification=True,
         )
 
         return
@@ -1543,6 +1588,8 @@ async def callbacks(
             "✅ Trip accepted!"
         )
 
+        # Edit the original order card.
+        # No second group message.
         await refresh_group_card(
             context,
             order_id,
@@ -1551,10 +1598,6 @@ async def callbacks(
         updated = get_order(
             order_id
         )
-
-        # -------------------------------------
-        # PRIVATE MESSAGE TO DRIVER
-        # -------------------------------------
 
         try:
             if (
@@ -1590,6 +1633,7 @@ async def callbacks(
                         updated
                     )
                 ),
+                disable_notification=True,
             )
 
         except Exception:
@@ -1597,10 +1641,6 @@ async def callbacks(
                 "Could not send accepted "
                 "order to driver"
             )
-
-        # -------------------------------------
-        # PRIVATE MESSAGE TO CREATOR
-        # -------------------------------------
 
         try:
             driver_username = ""
@@ -1641,6 +1681,7 @@ async def callbacks(
                         updated
                     )
                 ),
+                disable_notification=True,
             )
 
         except Exception:
@@ -1735,6 +1776,7 @@ async def callbacks(
             ),
             parse_mode="HTML",
             reply_markup=cancel_keyboard(),
+            disable_notification=True,
         )
 
         return
@@ -1773,6 +1815,7 @@ async def callbacks(
             ),
             parse_mode="HTML",
             reply_markup=cancel_keyboard(),
+            disable_notification=True,
         )
 
         return
@@ -1838,6 +1881,8 @@ async def callbacks(
             "Order cancelled."
         )
 
+        # Existing card is edited.
+        # No new group notification.
         await refresh_group_card(
             context,
             order_id,
@@ -1858,6 +1903,7 @@ async def callbacks(
                         "its creator."
                     ),
                     parse_mode="HTML",
+                    disable_notification=True,
                 )
 
             except Exception:
@@ -1973,8 +2019,8 @@ async def callbacks(
             "Order returned."
         )
 
-        # Existing card is edited.
-        # No new group notification.
+        # Restore the button on the SAME group card.
+        # No new group message.
         await refresh_group_card(
             context,
             order_id,
@@ -1997,6 +2043,7 @@ async def callbacks(
                     "available to drivers again."
                 ),
                 parse_mode="HTML",
+                disable_notification=True,
             )
 
         except Exception:
@@ -2024,18 +2071,15 @@ async def driver_group_text(
     if not update.message:
         return
 
-    # Administrators may write normally.
+    # Administrators can write normal group messages.
     if await is_admin(
         update.effective_user.id,
         context,
     ):
         return
 
-    # Backup protection:
-    # ordinary drivers' text is removed.
-    #
-    # We will additionally disable normal posting
-    # for ordinary members in Telegram group permissions.
+    # Backup protection.
+    # Ordinary drivers' text is removed.
     try:
         await update.message.delete()
 
