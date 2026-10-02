@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 db_lock = asyncio.Lock()
 
-# Temporary conversation states only.
-# Orders themselves are stored in SQLite.
+# Temporary conversation states.
+# Orders themselves are stored permanently in SQLite.
 user_state = {}
 
 
@@ -56,7 +56,7 @@ BTN_CANCEL = "❌ ΑΚΥΡΩΣΗ"
 
 BTN_NEW_CLIENT = "🚕 REQUEST A TAXI"
 
-# Old button names kept for compatibility
+# Old button names for compatibility
 OLD_NEW_DRIVER = "🚕 ΝΕΑ ΔΙΑΔΡΟΜΗ"
 OLD_MY_ORDER = "📋 MY ORDER"
 OLD_MY_ORDERS = "📋 MY ORDERS"
@@ -224,7 +224,7 @@ async def role_for(user_id, context):
 
 
 # =========================================================
-# PRIVATE BOT KEYBOARDS
+# PRIVATE KEYBOARDS
 # =========================================================
 
 def main_keyboard(role):
@@ -258,7 +258,7 @@ def cancel_keyboard():
 
 
 # =========================================================
-# DRIVER GROUP PERSISTENT KEYBOARD
+# PERMANENT DRIVER GROUP BUTTON
 # =========================================================
 
 def driver_group_keyboard():
@@ -575,15 +575,14 @@ async def create_order(
             )
 
             order_id = cursor.lastrowid
-
             conn.commit()
 
     order = get_order(
         order_id
     )
 
-    # This is the final order card.
-    # Normal group notification is allowed here.
+    # ONLY THE FINISHED ORDER IS POSTED TO THE GROUP.
+    # This is the actual group notification.
 
     message = await context.bot.send_message(
         chat_id=DRIVERS_GROUP_ID,
@@ -619,7 +618,7 @@ async def create_order(
 
 
 # =========================================================
-# BEGIN PRIVATE ORDER
+# START NEW ORDER PRIVATELY
 # =========================================================
 
 async def begin_new_order(
@@ -681,27 +680,13 @@ async def start(
     if not update.effective_chat:
         return
 
-    # If /start is sent inside the driver group,
-    # delete it and show the persistent group keyboard.
-
+    # /start inside driver group
     if update.effective_chat.id == DRIVERS_GROUP_ID:
 
         try:
             await update.effective_message.delete()
         except Exception:
             pass
-
-        await context.bot.send_message(
-            chat_id=DRIVERS_GROUP_ID,
-            text=(
-                "🚕 <b>ΝΕΑ ΔΙΑΔΡΟΜΗ</b>\n\n"
-                "👇 Πάτησε το κουμπί κάτω "
-                "για να δώσεις νέα διαδρομή."
-            ),
-            parse_mode="HTML",
-            reply_markup=driver_group_keyboard(),
-            disable_notification=True,
-        )
 
         return
 
@@ -808,7 +793,7 @@ async def start(
 
 # =========================================================
 # /PANEL
-# Activates the persistent button in the driver group.
+# Activates permanent group keyboard.
 # Admin only.
 # =========================================================
 
@@ -886,13 +871,16 @@ async def show_my_orders(
 
     if not orders:
 
-        text = (
-            "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
-            "Δεν έχεις ενεργές διαδρομές."
-            if role == "driver"
-            else
-            "📋 You have no active orders."
-        )
+        if role == "driver":
+            text = (
+                "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
+                "Δεν έχεις ενεργές διαδρομές."
+            )
+        else:
+            text = (
+                "📋 <b>MY ORDERS</b>\n\n"
+                "You have no active orders."
+            )
 
         await update.message.reply_text(
             text,
@@ -920,7 +908,6 @@ async def show_my_orders(
         )
 
         if len(short_details) > 30:
-
             short_details = (
                 short_details[:30] + "…"
             )
@@ -937,14 +924,19 @@ async def show_my_orders(
             ]
         )
 
-    text = (
-        "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
-        "👇 Διάλεξε τη διαδρομή που θέλεις:"
-        if role == "driver"
-        else
-        "📋 <b>MY ORDERS</b>\n\n"
-        "Choose an order:"
-    )
+    if role == "driver":
+
+        text = (
+            "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
+            "👇 Διάλεξε τη διαδρομή που θέλεις:"
+        )
+
+    else:
+
+        text = (
+            "📋 <b>MY ORDERS</b>\n\n"
+            "Choose an order:"
+        )
 
     await update.message.reply_text(
         text,
@@ -995,7 +987,6 @@ async def show_taken_orders(
         )
 
         if len(short_details) > 30:
-
             short_details = (
                 short_details[:30] + "…"
             )
@@ -1024,7 +1015,7 @@ async def show_taken_orders(
 
 
 # =========================================================
-# PRIVATE TEXT
+# PRIVATE TEXT HANDLER
 # =========================================================
 
 async def private_text(
@@ -1049,8 +1040,7 @@ async def private_text(
         context,
     )
 
-    # CANCEL CURRENT STEP
-
+    # CANCEL
     if text in (
         BTN_CANCEL,
         OLD_CANCEL,
@@ -1077,7 +1067,6 @@ async def private_text(
         return
 
     # NEW DRIVER ORDER
-
     if text in (
         BTN_NEW_DRIVER,
         OLD_NEW_DRIVER,
@@ -1101,7 +1090,6 @@ async def private_text(
         return
 
     # NEW CLIENT ORDER
-
     if text == BTN_NEW_CLIENT:
 
         await begin_new_order(
@@ -1113,7 +1101,6 @@ async def private_text(
         return
 
     # MY ORDERS
-
     if text in (
         BTN_MY_ORDERS,
         OLD_MY_ORDER,
@@ -1130,7 +1117,6 @@ async def private_text(
         return
 
     # TAKEN ORDERS
-
     if text in (
         BTN_TAKEN,
         OLD_TAKEN,
@@ -2205,7 +2191,7 @@ async def driver_group_text(
     ).strip()
 
     # =====================================================
-    # DRIVER PRESSES THE PERSISTENT NEW ORDER BUTTON
+    # PERMANENT GROUP BUTTON
     # =====================================================
 
     if text in (
@@ -2213,153 +2199,57 @@ async def driver_group_text(
         OLD_NEW_DRIVER,
     ):
 
-        # Delete the technical button message immediately.
-
+        # Telegram ReplyKeyboard technically sends this
+        # button text into the group first.
+        # Delete it immediately.
         try:
             await update.message.delete()
         except Exception:
             pass
 
-        # Only members of the driver group may use it.
-
+        # Only actual members of driver group
+        # may start a driver order.
         if not await is_driver(
             user.id,
             context,
         ):
             return
 
-        # If this driver already had an unfinished
-        # group prompt, remove the old prompt first.
-
-        old_state = user_state.get(
-            user.id
-        )
-
-        if old_state:
-
-            old_prompt_id = old_state.get(
-                "group_prompt_message_id"
-            )
-
-            if old_prompt_id:
-
-                try:
-                    await context.bot.delete_message(
-                        chat_id=DRIVERS_GROUP_ID,
-                        message_id=old_prompt_id,
-                    )
-                except Exception:
-                    pass
-
-        # Silent instruction inside the group.
-
-        prompt = await context.bot.send_message(
-            chat_id=DRIVERS_GROUP_ID,
-            text=(
-                f"🚕 <b>{html.escape(person_name(user))}</b>\n\n"
-                "Γράψε τώρα τα στοιχεία της διαδρομής "
-                "σε ΕΝΑ μήνυμα.\n\n"
-                "Παράδειγμα:\n"
-                "Larnaca Airport → Limassol\n"
-                "23:00\n"
-                "2 άτομα\n"
-                "€70"
-            ),
-            parse_mode="HTML",
-            reply_markup=driver_group_keyboard(),
-            disable_notification=True,
-        )
-
-        user_state[user.id] = {
-            "action": "group_new_details",
-            "role": "driver",
-            "group_prompt_message_id": (
-                prompt.message_id
-            ),
-        }
-
-        return
-
-    # =====================================================
-    # DRIVER SENDS ORDER DETAILS IN THE GROUP
-    # =====================================================
-
-    state = user_state.get(
-        user.id
-    )
-
-    if (
-        state
-        and state.get("action")
-        == "group_new_details"
-    ):
-
-        prompt_id = state.get(
-            "group_prompt_message_id"
-        )
-
-        if len(text) < 3:
-
-            try:
-                await update.message.delete()
-            except Exception:
-                pass
-
-            return
-
-        # Delete driver's raw order text immediately.
-
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
+        # IMPORTANT:
+        # From this moment NOTHING ELSE is posted
+        # to the driver group.
+        #
+        # All instructions go directly to the driver's
+        # private chat with the bot.
 
         try:
 
-            order_id = await create_order(
+            await begin_new_order(
+                update,
                 context,
-                user,
                 "driver",
-                text,
             )
 
         except Exception:
+
+            # Telegram will reject a private message
+            # if this user has never opened/started
+            # the bot privately.
+            user_state.pop(
+                user.id,
+                None,
+            )
 
             logger.exception(
-                "Could not create driver order from group"
+                "Could not start private order flow "
+                "for driver %s",
+                user.id,
             )
-
-            return
-
-        # Clear temporary state.
-
-        user_state.pop(
-            user.id,
-            None,
-        )
-
-        # Remove temporary instruction.
-
-        if prompt_id:
-
-            try:
-                await context.bot.delete_message(
-                    chat_id=DRIVERS_GROUP_ID,
-                    message_id=prompt_id,
-                )
-            except Exception:
-                pass
-
-        logger.info(
-            "Driver order #%s created from group by user %s",
-            order_id,
-            user.id,
-        )
 
         return
 
     # =====================================================
-    # ADMINS MAY WRITE NORMAL MESSAGES
+    # ADMINS MAY WRITE NORMAL GROUP MESSAGES
     # =====================================================
 
     if await is_admin(
@@ -2369,7 +2259,7 @@ async def driver_group_text(
         return
 
     # =====================================================
-    # ORDINARY DRIVER TEXT = DELETE
+    # ORDINARY DRIVER TEXT IS REMOVED
     # =====================================================
 
     try:
@@ -2440,8 +2330,7 @@ def main():
         )
     )
 
-    # Private bot messages
-
+    # Private messages
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE
@@ -2452,7 +2341,6 @@ def main():
     )
 
     # Driver group messages
-
     app.add_handler(
         MessageHandler(
             filters.Chat(
