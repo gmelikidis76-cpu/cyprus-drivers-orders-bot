@@ -13,6 +13,8 @@ from telegram import (
 )
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
+    TypeHandler,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
@@ -111,7 +113,9 @@ def init_db():
             )
 
         if not column_exists(
-            conn, "orders", "voice_group_message_id"
+            conn,
+            "orders",
+            "voice_group_message_id",
         ):
             conn.execute(
                 """
@@ -263,6 +267,76 @@ def contacts_card(order, english=False):
         )
 
     return text
+
+
+# ==================== ACCESS CONTROL ====================
+
+async def enforce_driver_access(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user = update.effective_user
+    chat = update.effective_chat
+    query = update.callback_query
+
+    if not user:
+        return
+
+    # Проверяем личные сообщения и все нажатия кнопок.
+    if not query and (not chat or chat.type != "private"):
+        return
+
+    try:
+        member = await context.bot.get_chat_member(
+            DRIVERS_GROUP_ID,
+            user.id,
+        )
+
+        blocked = member.status == "kicked" or (
+            member.status == "restricted"
+            and (
+                not member.is_member
+                or not member.can_send_messages
+            )
+        )
+
+        if not blocked:
+            return
+
+        user_state.pop(user.id, None)
+
+        message = (
+            "⛔ Μόνο προβολή. Η πρόσβαση στις παραγγελίες "
+            "έχει περιοριστεί από τον διαχειριστή.\n"
+            "View only. Order actions are disabled by the administrator."
+        )
+
+    except Exception:
+        logger.exception(
+            "Could not check bot access for user %s",
+            user.id,
+        )
+
+        # Если права проверить не удалось, действие не выполняем.
+        message = (
+            "⚠️ Δεν μπορώ να ελέγξω την πρόσβαση. "
+            "Δοκίμασε ξανά αργότερα.\n"
+            "Cannot verify access. Please try again later."
+        )
+
+    try:
+        if query:
+            await query.answer(message, show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(message)
+
+    except Exception:
+        logger.exception(
+            "Could not send access notice to user %s",
+            user.id,
+        )
+
+    raise ApplicationHandlerStop
 
 
 # ==================== KEYBOARDS ====================
@@ -1010,13 +1084,16 @@ async def show_my_orders(update, context, user_id, role):
     orders = get_creator_active_orders(user_id)
 
     if not orders:
-        text = (
-            "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
-            "Δεν έχεις ενεργές διαδρομές."
-            if role == "driver"
-            else "📋 <b>MY ORDERS</b>\n\n"
-                 "You have no active taxi requests."
-        )
+        if role == "driver":
+            text = (
+                "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
+                "Δεν έχεις ενεργές διαδρομές."
+            )
+        else:
+            text = (
+                "📋 <b>MY ORDERS</b>\n\n"
+                "You have no active taxi requests."
+            )
 
         await update.message.reply_text(
             text,
@@ -1047,13 +1124,16 @@ async def show_my_orders(update, context, user_id, role):
             )
         ])
 
-    title = (
-        "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
-        "👇 Διάλεξε τη διαδρομή:"
-        if role == "driver"
-        else "📋 <b>MY ORDERS</b>\n\n"
-             "👇 Select the request you want to manage:"
-    )
+    if role == "driver":
+        title = (
+            "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>\n\n"
+            "👇 Διάλεξε τη διαδρομή:"
+        )
+    else:
+        title = (
+            "📋 <b>MY ORDERS</b>\n\n"
+            "👇 Select the request you want to manage:"
+        )
 
     await update.message.reply_text(
         title,
@@ -1219,7 +1299,10 @@ async def private_text(
         and role == "client"
     ):
         await show_my_orders(
-            update, context, user.id, "client"
+            update,
+            context,
+            user.id,
+            "client",
         )
         return
 
@@ -1228,7 +1311,10 @@ async def private_text(
         and role == "driver"
     ):
         await show_my_orders(
-            update, context, user.id, "driver"
+            update,
+            context,
+            user.id,
+            "driver",
         )
         return
 
@@ -1260,12 +1346,14 @@ async def private_text(
 
     if action == "new_details":
         if len(text) < 3:
-            message = (
-                "Please send your trip details."
-                if state_role == "client"
-                else "Γράψε τα στοιχεία της διαδρομής "
-                     "ή στείλε 🎤 φωνητικό."
-            )
+            if state_role == "client":
+                message = "Please send your trip details."
+            else:
+                message = (
+                    "Γράψε τα στοιχεία της διαδρομής "
+                    "ή στείλε 🎤 φωνητικό."
+                )
+
             await update.message.reply_text(
                 message,
                 disable_notification=True,
@@ -1295,7 +1383,10 @@ async def private_text(
             )
         else:
             order_id = await create_text_order(
-                context, user, "driver", text
+                context,
+                user,
+                "driver",
+                text,
             )
 
             user_state.pop(user.id, None)
@@ -1320,9 +1411,11 @@ async def private_text(
             value = float(cleaned)
             if value <= 0:
                 raise ValueError
+
         except ValueError:
             await update.message.reply_text(
-                "Please enter a valid amount in EUR.\nExample: 50",
+                "Please enter a valid amount in EUR.\n"
+                "Example: 50",
                 disable_notification=True,
             )
             return
@@ -1364,6 +1457,7 @@ async def private_text(
                     .replace(",", ".")
                     .strip()
                 )
+
                 if not math.isfinite(number) or number <= 0:
                     raise ValueError
 
@@ -1403,6 +1497,7 @@ async def private_text(
                         f"UPDATE orders SET {column} = ? WHERE id = ?",
                         (value, order_id),
                     )
+
                     conn.commit()
 
                     updated = conn.execute(
@@ -1500,6 +1595,7 @@ async def private_voice(
             user,
             update.message.voice.file_id,
         )
+
     except Exception:
         logger.exception("Could not create voice order")
 
@@ -1649,6 +1745,7 @@ async def callbacks(
 
                 if cursor.rowcount != 1:
                     conn.rollback()
+
                     await query.answer(
                         "Την πήρε ήδη άλλος οδηγός.",
                         show_alert=True,
@@ -1673,6 +1770,7 @@ async def callbacks(
                 reply_markup=accepted_driver_keyboard(updated),
                 disable_notification=True,
             )
+
         except Exception:
             logger.exception("Could not message taker")
 
@@ -1684,12 +1782,13 @@ async def callbacks(
                 reply_markup=accepted_creator_keyboard(updated),
                 disable_notification=True,
             )
+
         except Exception:
             logger.exception("Could not message creator")
 
         return
 
-    # Управление доступно создателю и принявшему водителю.
+    # Управление заказом для обеих сторон.
     if action in {
         "manage",
         "edit_details",
@@ -1805,6 +1904,7 @@ async def callbacks(
                             """,
                             (order_id,),
                         )
+
                         conn.commit()
 
                         updated = conn.execute(
@@ -1844,7 +1944,7 @@ async def callbacks(
             )
             return
 
-    # Действия только для водителя, принявшего заказ.
+    # Действия только для принявшего водителя.
     if action in ("taken", "giveup", "confirm_giveup"):
         if (
             order["status"] != "taken"
@@ -1860,7 +1960,7 @@ async def callbacks(
         await query.answer()
 
         await query.edit_message_text(
-            "📦 <b>ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ</b>\n\n"
+            "📦 <b>ΔΙΑΔΡΟΜΗ ΠΟΥ ΠΗΡΑ</b>\n\n"
             + order_card(order),
             parse_mode="HTML",
             reply_markup=accepted_driver_keyboard(order),
@@ -1905,6 +2005,7 @@ async def callbacks(
                     """,
                     (order_id,),
                 )
+
                 conn.commit()
 
         await query.answer("Η διαδρομή επέστρεψε.")
@@ -1936,6 +2037,7 @@ async def callbacks(
                 parse_mode="HTML",
                 disable_notification=True,
             )
+
         except Exception:
             logger.exception("Could not notify creator")
 
@@ -1967,15 +2069,19 @@ async def driver_group_text(
 
         try:
             await begin_new_order(update, context, "driver")
+
         except Exception:
             user_state.pop(user.id, None)
             logger.exception(
                 "Could not start private driver flow"
             )
+
         return
 
     if await is_admin_in_chat(
-        DRIVERS_GROUP_ID, user.id, context
+        DRIVERS_GROUP_ID,
+        user.id,
+        context,
     ):
         return
 
@@ -2003,16 +2109,20 @@ async def client_group_text(
 
         try:
             await begin_new_order(update, context, "client")
+
         except Exception:
             user_state.pop(user.id, None)
             logger.info(
                 "Client must start bot privately first: %s",
                 user.id,
             )
+
         return
 
     if await is_admin_in_chat(
-        CLIENTS_GROUP_ID, user.id, context
+        CLIENTS_GROUP_ID,
+        user.id,
+        context,
     ):
         return
 
@@ -2071,6 +2181,12 @@ def main():
         Application.builder()
         .token(TOKEN)
         .build()
+    )
+
+    # Проверка доступа выполняется раньше остальных обработчиков.
+    app.add_handler(
+        TypeHandler(Update, enforce_driver_access),
+        group=-1,
     )
 
     app.add_handler(CommandHandler("start", start))
