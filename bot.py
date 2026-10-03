@@ -360,216 +360,87 @@ def open_order_keyboard(order_id):
     )
 
 
-def creator_manage_keyboard(order):
-    order_id = order["id"]
-
-    # CLIENT — ENGLISH
-    if order["creator_role"] == "client":
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "✏️ CHANGE TRIP DETAILS",
-                        callback_data=f"edit_details:{order_id}",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "💶 CHANGE PRICE",
-                        callback_data=f"edit_price:{order_id}",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "❌ CANCEL REQUEST",
-                        callback_data=f"cancel_order:{order_id}",
-                    )
-                ],
-            ]
+def can_manage_order(order, user_id):
+    return bool(order and order["status"] in ("open", "taken") and (
+        order["creator_id"] == user_id or (
+            order["status"] == "taken" and order["taker_id"] == user_id
         )
+    ))
 
-    # DRIVER VOICE ORDER
-    # Voice itself cannot be edited like text.
-    if is_voice_order(order):
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "❌ ΑΚΥΡΩΣΗ ΔΙΑΔΡΟΜΗΣ",
-                        callback_data=f"cancel_order:{order_id}",
-                    )
-                ]
-            ]
-        )
 
-    # DRIVER TEXT ORDER
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "✏️ ΑΛΛΑΓΗ ΣΤΟΙΧΕΙΩΝ",
-                    callback_data=f"edit_details:{order_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ ΑΚΥΡΩΣΗ ΔΙΑΔΡΟΜΗΣ",
-                    callback_data=f"cancel_order:{order_id}",
-                )
-            ],
-        ]
+def participant_role(order, user_id):
+    return order["creator_role"] if order["creator_id"] == user_id else "driver"
+
+
+def contact_identity(user_id, name, username):
+    url = html.escape(contact_url(user_id, username), quote=True)
+    label = html.escape(name or "Telegram user")
+    if username:
+        label += " — @" + html.escape(username)
+    return f'<a href="{url}">{label}</a>'
+
+
+def contacts_card(order, english=False):
+    creator_label = "Order creator" if english else "Από"
+    driver_label = "Driver" if english else "Οδηγός"
+    text = f"👤 {creator_label}: " + contact_identity(
+        order["creator_id"], order["creator_name"], order["creator_username"]
     )
+    if order["taker_id"]:
+        text += f"\n🚖 {driver_label}: " + contact_identity(
+            order["taker_id"], order["taker_name"], order["taker_username"]
+        )
+    return text
+
+
+def management_rows(order, role):
+    english = role == "client"
+    order_id = order["id"]
+    rows = [[InlineKeyboardButton(
+        "✏️ CHANGE TRIP DETAILS" if english else "✏️ ΑΛΛΑΓΗ ΣΤΟΙΧΕΙΩΝ",
+        callback_data=f"edit_details:{order_id}")]]
+    if order["creator_role"] == "client":
+        rows.append([InlineKeyboardButton(
+            "💶 CHANGE PRICE" if english else "💶 ΑΛΛΑΓΗ ΤΙΜΗΣ",
+            callback_data=f"edit_price:{order_id}")])
+    rows.append([InlineKeyboardButton(
+        "❌ CANCEL REQUEST" if english else "❌ ΑΚΥΡΩΣΗ ΔΙΑΔΡΟΜΗΣ",
+        callback_data=f"cancel_order:{order_id}")])
+    return rows
+
+
+def creator_manage_keyboard(order):
+    return InlineKeyboardMarkup(management_rows(order, order["creator_role"]))
 
 
 def accepted_driver_keyboard(order):
-    if order["creator_role"] == "client":
-        contact_label = "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΠΕΛΑΤΗ"
-    else:
-        contact_label = "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΟΔΗΓΟ"
-
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    contact_label,
-                    url=contact_url(
-                        order["creator_id"],
-                        order["creator_username"],
-                    ),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "↩️ ΑΦΗΣΕ ΤΗ ΔΙΑΔΡΟΜΗ",
-                    callback_data=f"giveup:{order['id']}",
-                )
-            ],
-        ]
-    )
-
-
-def accepted_creator_keyboard(order):
-    order_id = order["id"]
-    rows = []
-
-    # CLIENT — ENGLISH
-    if order["creator_role"] == "client":
-
-        if order["taker_id"]:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        "💬 CONTACT DRIVER",
-                        url=contact_url(
-                            order["taker_id"],
-                            order["taker_username"],
-                        ),
-                    )
-                ]
-            )
-
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "✏️ CHANGE TRIP DETAILS",
-                    callback_data=f"edit_details:{order_id}",
-                )
-            ]
-        )
-
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "💶 CHANGE PRICE",
-                    callback_data=f"edit_price:{order_id}",
-                )
-            ]
-        )
-
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "❌ CANCEL REQUEST",
-                    callback_data=f"cancel_order:{order_id}",
-                )
-            ]
-        )
-
-        return InlineKeyboardMarkup(rows)
-
-    # DRIVER — GREEK
-    if order["taker_id"]:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΟΔΗΓΟ",
-                    url=contact_url(
-                        order["taker_id"],
-                        order["taker_username"],
-                    ),
-                )
-            ]
-        )
-
-    if not is_voice_order(order):
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "✏️ ΑΛΛΑΓΗ ΣΤΟΙΧΕΙΩΝ",
-                    callback_data=f"edit_details:{order_id}",
-                )
-            ]
-        )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "❌ ΑΚΥΡΩΣΗ ΔΙΑΔΡΟΜΗΣ",
-                callback_data=f"cancel_order:{order_id}",
-            )
-        ]
-    )
-
+    label = "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΠΕΛΑΤΗ" if order["creator_role"] == "client" else "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΟΔΗΓΟ"
+    rows = [[InlineKeyboardButton(label, url=contact_url(
+        order["creator_id"], order["creator_username"]))]]
+    rows.extend(management_rows(order, "driver"))
+    rows.append([InlineKeyboardButton("↩️ ΑΦΗΣΕ ΤΗ ΔΙΑΔΡΟΜΗ",
+        callback_data=f"giveup:{order['id']}")])
     return InlineKeyboardMarkup(rows)
 
 
-def confirm_cancel_keyboard(order):
-    order_id = order["id"]
+def accepted_creator_keyboard(order):
+    rows = []
+    if order["taker_id"]:
+        rows.append([InlineKeyboardButton(
+            "💬 CONTACT DRIVER" if order["creator_role"] == "client" else "💬 ΕΠΙΚΟΙΝΩΝΙΑ ΜΕ ΟΔΗΓΟ",
+            url=contact_url(order["taker_id"], order["taker_username"]))])
+    rows.extend(management_rows(order, order["creator_role"]))
+    return InlineKeyboardMarkup(rows)
 
-    if order["creator_role"] == "client":
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "✅ YES, CANCEL REQUEST",
-                        callback_data=f"confirm_cancel:{order_id}",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "⬅️ BACK",
-                        callback_data=f"manage:{order_id}",
-                    )
-                ],
-            ]
-        )
 
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "✅ ΝΑΙ, ΑΚΥΡΩΣΗ",
-                    callback_data=f"confirm_cancel:{order_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ ΠΙΣΩ",
-                    callback_data=f"manage:{order_id}",
-                )
-            ],
-        ]
-    )
+def confirm_cancel_keyboard(order, user_id):
+    english = participant_role(order, user_id) == "client"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ YES, CANCEL REQUEST" if english else "✅ ΝΑΙ, ΑΚΥΡΩΣΗ",
+            callback_data=f"confirm_cancel:{order['id']}")],
+        [InlineKeyboardButton("⬅️ BACK" if english else "⬅️ ΠΙΣΩ",
+            callback_data=f"manage:{order['id']}")],
+    ])
 
 
 def confirm_giveup_keyboard(order_id):
@@ -648,6 +519,9 @@ def order_card(order):
             f"🔢 Αριθμός: #{order_id}"
         )
 
+    if is_voice_order(order) and order["details"] != "VOICE ORDER":
+        text += "\n\n" + html.escape(order["details"])
+
     if order["status"] == "taken":
 
         taker = html.escape(
@@ -657,7 +531,7 @@ def order_card(order):
         text += (
             "\n\n"
             "✅ <b>Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ</b>\n"
-            f"🚖 Την πήρε: <b>{taker}</b>"
+            + contacts_card(order)
         )
 
     elif order["status"] == "cancelled":
@@ -716,6 +590,10 @@ def private_order_card(order):
                 f"<b>{html.escape(order['taker_name'])}</b>"
             )
 
+        if order["status"] == "taken":
+            text += "\n\n" + contacts_card(order, order["creator_role"] == "client")
+        if is_voice_order(order) and order["details"] != "VOICE ORDER":
+            text += "\n\n" + html.escape(order["details"])
         return text
 
     # DRIVER VOICE
@@ -744,6 +622,10 @@ def private_order_card(order):
                 f"<b>{html.escape(order['taker_name'])}</b>"
             )
 
+        if order["status"] == "taken":
+            text += "\n\n" + contacts_card(order, order["creator_role"] == "client")
+        if is_voice_order(order) and order["details"] != "VOICE ORDER":
+            text += "\n\n" + html.escape(order["details"])
         return text
 
     # DRIVER TEXT
@@ -1440,6 +1322,23 @@ async def show_taken_orders(
 # PRIVATE TEXT
 # =========================================================
 
+async def notify_order_change(context, order, actor_id, cancelled=False):
+    recipients = {order["creator_id"], order["taker_id"]} - {None, actor_id}
+    for recipient in recipients:
+        english = participant_role(order, recipient) == "client"
+        title = ("❌ REQUEST CANCELLED" if english else "❌ Η ΔΙΑΔΡΟΜΗ ΑΚΥΡΩΘΗΚΕ") if cancelled else (
+            "⚠️ REQUEST UPDATED" if english else "⚠️ ΑΛΛΑΓΗ ΔΙΑΔΡΟΜΗΣ")
+        card = private_order_card(order) if recipient == order["creator_id"] else order_card(order)
+        markup = None if cancelled else (accepted_creator_keyboard(order)
+            if recipient == order["creator_id"] else accepted_driver_keyboard(order))
+        try:
+            await context.bot.send_message(chat_id=recipient,
+                text=f"<b>{title}</b>\n\n{card}", parse_mode="HTML",
+                reply_markup=markup, disable_notification=False)
+        except Exception:
+            logger.exception("Could not notify order participant %s", recipient)
+
+
 async def private_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1792,278 +1691,53 @@ async def private_text(
     # EDIT DETAILS
     # =====================================================
 
-    if action == "edit_details":
-
+    if action in ("edit_details", "edit_price"):
         order_id = state["order_id"]
-
-        order = get_order(
-            order_id
-        )
-
-        if (
-            not order
-            or order["creator_id"] != user.id
-            or order["status"] not in (
-                "open",
-                "taken",
-            )
-        ):
-
-            user_state.pop(
-                user.id,
-                None,
-            )
-
-            if state_role == "client":
-                message = (
-                    "This request can no longer be edited."
-                )
-            else:
-                message = (
-                    "Η διαδρομή δεν μπορεί πλέον να αλλάξει."
-                )
-
-            await update.message.reply_text(
-                message,
-                reply_markup=main_keyboard(
-                    state_role
-                ),
-                disable_notification=True,
-            )
-
-            return
-
-        # Voice order is not edited as text.
-        if is_voice_order(order):
-
-            user_state.pop(
-                user.id,
-                None,
-            )
-
-            await update.message.reply_text(
-                "🎤 Η φωνητική διαδρομή δεν αλλάζει ως κείμενο.\n"
-                "Ακύρωσέ την και δημιούργησε νέα αν χρειάζεται.",
-                reply_markup=main_keyboard(
-                    "driver"
-                ),
-                disable_notification=True,
-            )
-
-            return
-
+        value = text
+        if action == "edit_price":
+            import math
+            try:
+                number = float(text.replace("€", "").replace(",", ".").strip())
+                if not math.isfinite(number) or number <= 0:
+                    raise ValueError
+                value = f"{number:g}"
+            except ValueError:
+                await update.message.reply_text(
+                    "Please enter a valid amount in EUR." if state_role == "client"
+                    else "Στείλε έγκυρο ποσό σε EUR.")
+                return
         async with db_lock:
             with db() as conn:
-
-                conn.execute(
-                    """
-                    UPDATE orders
-                    SET details = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        text,
-                        order_id,
-                    ),
-                )
-
-                conn.commit()
-
-        await refresh_group_card(
-            context,
-            order_id,
-        )
-
-        updated = get_order(
-            order_id
-        )
-
-        user_state.pop(
-            user.id,
-            None,
-        )
-
-        # Notify accepted driver in Greek.
-        if (
-            updated["status"] == "taken"
-            and updated["taker_id"]
-        ):
-            try:
-                await context.bot.send_message(
-                    chat_id=updated["taker_id"],
-                    text=(
-                        "⚠️ <b>ΑΛΛΑΓΗ ΔΙΑΔΡΟΜΗΣ</b>\n\n"
-                        f"Η διαδρομή #{order_id} άλλαξε.\n\n"
-                        f"{html.escape(text)}"
-                    ),
-                    parse_mode="HTML",
-                    reply_markup=accepted_driver_keyboard(
-                        updated
-                    ),
-                    disable_notification=True,
-                )
-
-            except Exception:
-                logger.exception(
-                    "Could not notify accepted driver"
-                )
-
-        if updated["creator_role"] == "client":
-
-            message = (
-                "✅ Your trip details have been updated."
-            )
-
-            keyboard_role = "client"
-
-        else:
-
-            message = (
-                "✅ Η διαδρομή ενημερώθηκε."
-            )
-
-            keyboard_role = "driver"
-
+                current = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+                allowed = can_manage_order(current, user.id) and (
+                    action != "edit_price" or current["creator_role"] == "client")
+                if allowed:
+                    # Column comes exclusively from this fixed allowlist.
+                    column = "details" if action == "edit_details" else "price"
+                    conn.execute(f"UPDATE orders SET {column} = ? WHERE id = ?", (value, order_id))
+                    conn.commit()
+                    updated = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        user_state.pop(user.id, None)
+        if not allowed:
+            await update.message.reply_text(
+                "This request can no longer be edited." if state_role == "client"
+                else "Η διαδρομή δεν μπορεί πλέον να αλλάξει.",
+                reply_markup=main_keyboard(state_role))
+            return
+        await refresh_group_card(context, order_id)
+        await notify_order_change(context, updated, user.id)
+        markup = (accepted_driver_keyboard(updated) if updated["taker_id"] == user.id
+            and updated["creator_id"] != user.id else
+            accepted_creator_keyboard(updated) if updated["status"] == "taken"
+            else creator_manage_keyboard(updated))
         await update.message.reply_text(
-            message,
-            reply_markup=main_keyboard(
-                keyboard_role
-            ),
-            disable_notification=True,
-        )
-
+            "✅ Updated." if state_role == "client" else "✅ Η διαδρομή ενημερώθηκε.",
+            reply_markup=main_keyboard(state_role))
+        await update.message.reply_text(
+            private_order_card(updated) if updated["creator_id"] == user.id else order_card(updated),
+            parse_mode="HTML", reply_markup=markup)
         return
 
-    # =====================================================
-    # EDIT CLIENT PRICE
-    # =====================================================
-
-    if action == "edit_price":
-
-        order_id = state["order_id"]
-
-        cleaned = (
-            text
-            .replace("€", "")
-            .replace(",", ".")
-            .strip()
-        )
-
-        try:
-            value = float(
-                cleaned
-            )
-
-            if value <= 0:
-                raise ValueError
-
-        except ValueError:
-
-            await update.message.reply_text(
-                "Please enter a valid amount in EUR.\n"
-                "Example: 50",
-                disable_notification=True,
-            )
-
-            return
-
-        order = get_order(
-            order_id
-        )
-
-        if (
-            not order
-            or order["creator_id"] != user.id
-            or order["creator_role"] != "client"
-            or order["status"] not in (
-                "open",
-                "taken",
-            )
-        ):
-
-            user_state.pop(
-                user.id,
-                None,
-            )
-
-            await update.message.reply_text(
-                "This request can no longer be edited.",
-                reply_markup=main_keyboard(
-                    "client"
-                ),
-                disable_notification=True,
-            )
-
-            return
-
-        price = f"{value:g}"
-
-        async with db_lock:
-            with db() as conn:
-
-                conn.execute(
-                    """
-                    UPDATE orders
-                    SET price = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        price,
-                        order_id,
-                    ),
-                )
-
-                conn.commit()
-
-        await refresh_group_card(
-            context,
-            order_id,
-        )
-
-        updated = get_order(
-            order_id
-        )
-
-        user_state.pop(
-            user.id,
-            None,
-        )
-
-        if (
-            updated["status"] == "taken"
-            and updated["taker_id"]
-        ):
-            try:
-                await context.bot.send_message(
-                    chat_id=updated["taker_id"],
-                    text=(
-                        "⚠️ <b>ΑΛΛΑΓΗ ΤΙΜΗΣ</b>\n\n"
-                        f"Διαδρομή #{order_id}\n"
-                        f"Νέα τιμή: €{price}"
-                    ),
-                    parse_mode="HTML",
-                    disable_notification=True,
-                )
-
-            except Exception:
-                logger.exception(
-                    "Could not notify driver"
-                )
-
-        await update.message.reply_text(
-            "✅ Your offer has been updated.",
-            reply_markup=main_keyboard(
-                "client"
-            ),
-            disable_notification=True,
-        )
-
-        return
-
-
-# =========================================================
-# PRIVATE VOICE — DRIVER ONLY
-# =========================================================
 
 async def private_voice(
     update: Update,
@@ -2379,36 +2053,7 @@ async def callbacks(
 
         try:
 
-            if is_voice_order(updated):
-
-                driver_text = (
-                    "✅ <b>ΠΗΡΕΣ ΤΗ ΦΩΝΗΤΙΚΗ ΔΙΑΔΡΟΜΗ</b>\n\n"
-                    f"🔢 Αριθμός: #{order_id}\n"
-                    f"👤 Από: "
-                    f"<b>{html.escape(updated['creator_name'])}</b>\n\n"
-                    "🎤 Το φωνητικό βρίσκεται "
-                    "στην ομάδα οδηγών."
-                )
-
-            else:
-
-                driver_text = (
-                    "✅ <b>ΠΗΡΕΣ ΤΗ ΔΙΑΔΡΟΜΗ</b>\n\n"
-                    f"🔢 Αριθμός: #{order_id}\n\n"
-                    f"{html.escape(updated['details'])}\n\n"
-                    f"👤 Από: "
-                    f"<b>{html.escape(updated['creator_name'])}</b>"
-                )
-
-                if (
-                    updated["creator_role"] == "client"
-                    and updated["price"]
-                ):
-                    driver_text += (
-                        "\n"
-                        f"💶 Προσφορά: "
-                        f"<b>€{html.escape(updated['price'])}</b>"
-                    )
+            driver_text = "✅ <b>ΠΗΡΕΣ ΤΗ ΔΙΑΔΡΟΜΗ</b>\n\n" + order_card(updated)
 
             await context.bot.send_message(
                 chat_id=user.id,
@@ -2431,30 +2076,7 @@ async def callbacks(
 
         try:
 
-            # CLIENT — ENGLISH
-            if updated["creator_role"] == "client":
-
-                creator_text = (
-                    "✅ <b>DRIVER FOUND!</b>\n\n"
-                    f"🚕 Request: #{order_id}\n"
-                    f"👤 Driver: "
-                    f"<b>{html.escape(person_name(user))}</b>\n\n"
-                    "Your driver has accepted your trip.\n\n"
-                    "👇 You can contact the driver "
-                    "using the button below."
-                )
-
-            # DRIVER CREATOR — GREEK
-            else:
-
-                creator_text = (
-                    "✅ <b>Η ΔΙΑΔΡΟΜΗ ΔΟΘΗΚΕ</b>\n\n"
-                    f"🔢 Αριθμός: #{order_id}\n"
-                    f"🚖 Την πήρε ο οδηγός: "
-                    f"<b>{html.escape(person_name(user))}</b>\n\n"
-                    "👇 Μπορείς να επικοινωνήσεις "
-                    "μαζί του από το κουμπί παρακάτω."
-                )
+            creator_text = private_order_card(updated)
 
             await context.bot.send_message(
                 chat_id=updated["creator_id"],
@@ -2474,319 +2096,64 @@ async def callbacks(
         return
 
     # =====================================================
-    # CREATOR SECURITY
+    # PARTICIPANT SECURITY AND MANAGEMENT
     # =====================================================
-
-    if action in {
-        "manage",
-        "edit_details",
-        "edit_price",
-        "cancel_order",
-        "confirm_cancel",
-    }:
-
-        if order["creator_id"] != user.id:
-
-            if order["creator_role"] == "client":
-                message = (
-                    "This is not your request."
-                )
-            else:
-                message = (
-                    "Δεν είναι δική σου διαδρομή."
-                )
-
-            await query.answer(
-                message,
-                show_alert=True,
-            )
-
+    if action in {"manage", "edit_details", "edit_price", "cancel_order", "confirm_cancel"}:
+        if not can_manage_order(order, user.id):
+            await query.answer("This order is closed or is not yours.", show_alert=True)
             return
+        role = participant_role(order, user.id)
+        english = role == "client"
 
-    # =====================================================
-    # MANAGE
-    # =====================================================
-
-    if action == "manage":
-
-        await query.answer()
-
-        if order["status"] == "taken":
-            markup = accepted_creator_keyboard(
-                order
-            )
-        else:
-            markup = creator_manage_keyboard(
-                order
-            )
-
-        await query.edit_message_text(
-            private_order_card(
-                order
-            ),
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
-
-        return
-
-    # =====================================================
-    # EDIT DETAILS
-    # =====================================================
-
-    if action == "edit_details":
-
-        if order["status"] not in (
-            "open",
-            "taken",
-        ):
-
-            if order["creator_role"] == "client":
-                message = (
-                    "This request can no longer be edited."
-                )
-            else:
-                message = (
-                    "Δεν μπορεί να αλλάξει."
-                )
-
-            await query.answer(
-                message,
-                show_alert=True,
-            )
-
-            return
-
-        if is_voice_order(order):
-
-            await query.answer(
-                "Η φωνητική διαδρομή δεν αλλάζει ως κείμενο.",
-                show_alert=True,
-            )
-
-            return
-
-        user_state[user.id] = {
-            "action": "edit_details",
-            "order_id": order_id,
-            "role": order["creator_role"],
-        }
-
-        await query.answer()
-
-        if order["creator_role"] == "client":
-
-            message = (
-                "✏️ <b>CHANGE TRIP DETAILS</b>\n\n"
-                f"Send the NEW details for "
-                f"request #{order_id} in one message."
-            )
-
-            role = "client"
-
-        else:
-
-            message = (
-                "✏️ <b>ΑΛΛΑΓΗ ΣΤΟΙΧΕΙΩΝ</b>\n\n"
-                f"Στείλε τα ΝΕΑ στοιχεία "
-                f"για τη διαδρομή #{order_id} "
-                "σε ένα μήνυμα."
-            )
-
-            role = "driver"
-
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=message,
-            parse_mode="HTML",
-            reply_markup=cancel_keyboard(
-                role
-            ),
-            disable_notification=True,
-        )
-
-        return
-
-    # =====================================================
-    # EDIT PRICE — CLIENT
-    # =====================================================
-
-    if action == "edit_price":
-
-        if (
-            order["creator_role"] != "client"
-            or order["status"] not in (
-                "open",
-                "taken",
-            )
-        ):
-
-            await query.answer(
-                "The price cannot be changed.",
-                show_alert=True,
-            )
-
-            return
-
-        user_state[user.id] = {
-            "action": "edit_price",
-            "order_id": order_id,
-            "role": "client",
-        }
-
-        await query.answer()
-
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=(
-                "💶 <b>CHANGE PRICE</b>\n\n"
-                f"Send your new offer for "
-                f"request #{order_id}.\n\n"
-                "Example: <b>50</b>"
-            ),
-            parse_mode="HTML",
-            reply_markup=cancel_keyboard(
-                "client"
-            ),
-            disable_notification=True,
-        )
-
-        return
-
-    # =====================================================
-    # ASK CANCEL
-    # =====================================================
-
-    if action == "cancel_order":
-
-        if order["status"] not in (
-            "open",
-            "taken",
-        ):
-
-            if order["creator_role"] == "client":
-                message = (
-                    "This request is already closed."
-                )
-            else:
-                message = (
-                    "Η διαδρομή έχει ήδη κλείσει."
-                )
-
-            await query.answer(
-                message,
-                show_alert=True,
-            )
-
-            return
-
-        await query.answer()
-
-        await query.edit_message_reply_markup(
-            reply_markup=confirm_cancel_keyboard(
-                order
-            )
-        )
-
-        return
-
-    # =====================================================
-    # CONFIRM CANCEL
-    # =====================================================
-
-    if action == "confirm_cancel":
-
-        if order["status"] not in (
-            "open",
-            "taken",
-        ):
-
-            if order["creator_role"] == "client":
-                message = (
-                    "This request is already closed."
-                )
-            else:
-                message = (
-                    "Η διαδρομή έχει ήδη κλείσει."
-                )
-
-            await query.answer(
-                message,
-                show_alert=True,
-            )
-
-            return
-
-        taker_id = order["taker_id"]
-
-        async with db_lock:
-            with db() as conn:
-
-                conn.execute(
-                    """
-                    UPDATE orders
-                    SET status = 'cancelled'
-                    WHERE id = ?
-                    """,
-                    (
-                        order_id,
-                    ),
-                )
-
-                conn.commit()
-
-        await refresh_group_card(
-            context,
-            order_id,
-        )
-
-        # CLIENT
-        if order["creator_role"] == "client":
-
-            await query.answer(
-                "Request cancelled."
-            )
-
+        if action == "manage":
+            await query.answer()
+            markup = (accepted_driver_keyboard(order) if user.id != order["creator_id"]
+                else accepted_creator_keyboard(order) if order["status"] == "taken"
+                else creator_manage_keyboard(order))
             await query.edit_message_text(
-                "❌ <b>REQUEST CANCELLED</b>\n\n"
-                f"Taxi request #{order_id} has been cancelled.",
-                parse_mode="HTML",
-            )
+                private_order_card(order) if user.id == order["creator_id"] else order_card(order),
+                parse_mode="HTML", reply_markup=markup)
+            return
 
-        # DRIVER
-        else:
+        if action in ("edit_details", "edit_price"):
+            if action == "edit_price" and order["creator_role"] != "client":
+                await query.answer("The price cannot be changed.", show_alert=True)
+                return
+            user_state[user.id] = {"action": action, "order_id": order_id, "role": role}
+            await query.answer()
+            if action == "edit_price":
+                prompt = "Send the new price in EUR. Example: 50" if english else "Στείλε τη νέα τιμή σε EUR. Παράδειγμα: 50"
+            else:
+                prompt = "Send the new trip details in one message." if english else "Στείλε τα νέα στοιχεία σε ένα μήνυμα."
+                if is_voice_order(order):
+                    prompt += "\nΤο αρχικό φωνητικό παραμένει. Αλλάζει μόνο η περιγραφή."
+            await context.bot.send_message(chat_id=user.id, text=prompt,
+                reply_markup=cancel_keyboard(role))
+            return
 
-            await query.answer(
-                "Η διαδρομή ακυρώθηκε."
-            )
+        if action == "cancel_order":
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=confirm_cancel_keyboard(order, user.id))
+            return
 
+        if action == "confirm_cancel":
+            async with db_lock:
+                with db() as conn:
+                    current = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+                    allowed = can_manage_order(current, user.id)
+                    if allowed:
+                        conn.execute("UPDATE orders SET status = 'cancelled' WHERE id = ?", (order_id,))
+                        conn.commit()
+                        updated = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+            if not allowed:
+                await query.answer("The order status has changed.", show_alert=True)
+                return
+            await query.answer("Request cancelled." if english else "Η διαδρομή ακυρώθηκε.")
+            await refresh_group_card(context, order_id)
             await query.edit_message_text(
-                "❌ <b>Η ΔΙΑΔΡΟΜΗ ΑΚΥΡΩΘΗΚΕ</b>\n\n"
-                f"Διαδρομή #{order_id}.",
-                parse_mode="HTML",
-            )
-
-        # Accepted driver always receives Greek.
-        if taker_id:
-
-            try:
-                await context.bot.send_message(
-                    chat_id=taker_id,
-                    text=(
-                        "❌ <b>Η ΔΙΑΔΡΟΜΗ ΑΚΥΡΩΘΗΚΕ</b>\n\n"
-                        f"Η διαδρομή #{order_id} "
-                        "ακυρώθηκε από αυτόν που την έδωσε."
-                    ),
-                    parse_mode="HTML",
-                    disable_notification=True,
-                )
-
-            except Exception:
-                logger.exception(
-                    "Could not notify taker"
-                )
-
-        return
+                ("❌ REQUEST CANCELLED" if english else "❌ Η ΔΙΑΔΡΟΜΗ ΑΚΥΡΩΘΗΚΕ") + f"\n#{order_id}")
+            await notify_order_change(context, updated, user.id, cancelled=True)
+            return
 
     # =====================================================
     # TAKEN ORDER SECURITY
@@ -2818,23 +2185,7 @@ async def callbacks(
 
         await query.answer()
 
-        if is_voice_order(order):
-
-            text = (
-                "📦 <b>ΔΙΑΔΡΟΜΗ ΠΟΥ ΠΗΡΑ</b>\n\n"
-                f"🎤 Φωνητική διαδρομή #{order_id}\n"
-                f"👤 Από: "
-                f"<b>{html.escape(order['creator_name'])}</b>\n\n"
-                "Το αρχικό φωνητικό βρίσκεται "
-                "στην ομάδα οδηγών."
-            )
-
-        else:
-
-            text = (
-                "📦 <b>ΔΙΑΔΡΟΜΗ ΠΟΥ ΠΗΡΑ</b>\n\n"
-                + order_card(order)
-            )
+        text = "📦 <b>ΔΙΑΔΡΟΜΗ ΠΟΥ ΠΗΡΑ</b>\n\n" + order_card(order)
 
         await query.edit_message_text(
             text,
