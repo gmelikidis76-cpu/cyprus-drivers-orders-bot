@@ -43,6 +43,7 @@ DRIVERS_GROUP_ID = -1004449292276
 CLIENTS_GROUP_ID = -1004401199110
 
 BOT_USERNAME = "CyprusDriversOrdersBot"
+BOT_VERSION = "GROUP-CONTACTS-2"
 DB_PATH = os.getenv("DB_PATH", "/data/orders.db")
 
 # Всего личных уведомлений, включая первое.
@@ -363,10 +364,9 @@ def contacts_card(order, english=False):
 
 
 def driver_private_order_card(order):
-    text = order_card(order).replace("ακριβώς από πάνω", "στην ομάδα οδηγών")
-    if order["status"] == "taken":
-        text += "\n\n" + contacts_card(order)
-    return text
+    return order_card(order).replace(
+        "ακριβώς από πάνω", "στην ομάδα οδηγών"
+    )
 
 
 def button(
@@ -743,21 +743,9 @@ def order_card(order):
         f"🚕 <b>ΔΙΑΔΡΟΜΗ #{order['id']} — {title}</b>\n"
         f"<b>{status}</b>\n\n"
         f"<b>{details}</b>\n\n"
-        f"💶 <b>ΤΙΜΗ: {price}</b>\n"
-        "👤 Από: "
-        + contact_identity(
-            order["creator_id"],
-            order["creator_name"],
-            order["creator_username"],
-        )
+        f"💶 <b>ΤΙΜΗ: {price}</b>\n\n"
+        + contacts_card(order)
     )
-
-    if order["status"] == "taken":
-        text += "\n🚖 Οδηγός: " + contact_identity(
-            order["taker_id"],
-            order["taker_name"],
-            order["taker_username"],
-        )
 
     return text
 
@@ -1147,6 +1135,7 @@ async def start_alert_worker(application):
             ("new", "New request / Νέα διαδρομή"),
             ("help", "Help / Βοήθεια"),
             ("profile", "My details / Τα στοιχεία μου"),
+            ("version", "Bot version"),
         ])
 
         await send_driver_panel(application)
@@ -1155,7 +1144,7 @@ async def start_alert_worker(application):
             orders = conn.execute(
                 """
                 SELECT id FROM orders
-                WHERE status = 'open'
+                WHERE status IN ('open', 'taken')
                   AND group_message_id IS NOT NULL
                 """
             ).fetchall()
@@ -2147,6 +2136,14 @@ async def panel_command(
         disable_notification=True,
         disable_web_page_preview=True,
     )
+
+
+async def version_command(update, context):
+    if update.effective_chat and update.effective_chat.type == "private":
+        await update.effective_message.reply_text(
+            f"Версия бота: {BOT_VERSION}\n"
+            "Имена, телефоны и данные машин отображаются в группе."
+        )
 
 
 async def id_command(
@@ -3406,6 +3403,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", help_command))
     app.add_handler(CommandHandler("id", id_command))
+    app.add_handler(CommandHandler("version", version_command))
 
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.CONTACT, private_contact))
