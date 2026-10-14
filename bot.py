@@ -43,7 +43,7 @@ DRIVERS_GROUP_ID = -1004449292276
 CLIENTS_GROUP_ID = -1004401199110
 
 BOT_USERNAME = "CyprusDriversOrdersBot"
-BOT_VERSION = "GROUP-CONTACTS-2"
+BOT_VERSION = "GROUP-CHAT-3"
 DB_PATH = os.getenv("DB_PATH", "/data/orders.db")
 
 # Всего личных уведомлений, включая первое.
@@ -1125,39 +1125,28 @@ async def order_alert_worker(application):
 
 
 async def start_alert_worker(application):
-    application.bot_data["order_alert_worker"] = (
-        asyncio.create_task(order_alert_worker(application))
-    )
-
+    application.bot_data["order_alert_worker"] = asyncio.create_task(order_alert_worker(application))
     try:
         await application.bot.set_my_commands([
-            ("start", "Menu / Μενού"),
-            ("new", "New request / Νέα διαδρομή"),
-            ("help", "Help / Βοήθεια"),
-            ("profile", "My details / Τα στοιχεία μου"),
+            ("start", "Menu / Μενού"), ("new", "New request / Νέα διαδρομή"),
+            ("help", "Help / Βοήθεια"), ("profile", "My details / Τα στοιχεία μου"),
             ("version", "Bot version"),
         ])
-
-        await send_driver_panel(application)
-
-        with db() as conn:
-            orders = conn.execute(
-                """
-                SELECT id FROM orders
-                WHERE status IN ('open', 'taken')
-                  AND group_message_id IS NOT NULL
-                """
-            ).fetchall()
-
-        for order in orders:
-            await refresh_group_card(application, order["id"])
-            await asyncio.sleep(0.1)
-
     except TelegramError:
-        logger.exception(
-            "Could not update driver panel on startup; "
-            "use /panel later"
-        )
+        logger.exception("Could not update bot commands")
+    for send_panel in (send_driver_panel, send_client_panel):
+        try:
+            await send_panel(application)
+        except TelegramError:
+            logger.exception("Could not update group panel; use /panel later")
+    with db() as conn:
+        orders = conn.execute("""
+            SELECT id FROM orders
+            WHERE status IN ('open', 'taken') AND group_message_id IS NOT NULL
+        """).fetchall()
+    for order in orders:
+        await refresh_group_card(application, order["id"])
+        await asyncio.sleep(0.1)
 
 
 async def stop_alert_worker(application):
@@ -1891,37 +1880,118 @@ async def draft_callback(update, context):
 
 # ==================== DRIVER GROUP PANEL ====================
 
+async def send_group_bot_link(update, context, role, *, needs_start=False, ready=False):
+    user = update.effective_user
+    english = role == "client"
+    url = f"https://t.me/{BOT_USERNAME}"
+    if needs_start:
+        url += f"?start={role}"
+        message = (
+            "Open the bot below and press START once. If blocked, unblock it first."
+            if english else
+            "Πάτησε το κουμπί παρακάτω και μετά START μία φορά. Αν έχεις μπλοκάρει το bot, ξεμπλόκαρέ το."
+        )
+    elif ready:
+        message = (
+            "I sent you a private message. Tap OPEN BOT below to continue there."
+            if english else
+            "Σου έστειλα προσωπικό μήνυμα. Πάτησε ΑΝΟΙΞΕ ΤΟ BOT παρακάτω και συνέχισε εκεί."
+        )
+    else:
+        message = (
+            "Tap OPEN BOT below. Register your details there and use REQUEST A TAXI."
+            if english else
+            "Πάτησε ΑΝΟΙΞΕ ΤΟ BOT παρακάτω. Εκεί βάζεις τα στοιχεία σου και πατάς ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ."
+        )
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=contact_identity(user.id, person_name(user), user.username) + "\n" + message,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("👉 OPEN BOT" if english else "👉 ΑΝΟΙΞΕ ΤΟ BOT", url=url)
+        ]]),
+        disable_notification=True,
+        disable_web_page_preview=True,
+    )
+
+
+async def start_group_order(update, context, role):
+    try:
+        await begin_new_order(update, context, role)
+    except (Forbidden, BadRequest) as exc:
+        if not isinstance(exc, Forbidden) and "chat not found" not in str(exc).lower():
+            raise
+        user_state.pop(update.effective_user.id, None)
+        await send_group_bot_link(update, context, role, needs_start=True)
+        return
+    except TelegramError:
+        logger.exception("Could not start private order flow for %s", update.effective_user.id)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=("Cannot send the private message right now. Please try again later."
+                  if role == "client" else
+                  "Δεν μπορώ να στείλω προσωπικό μήνυμα τώρα. Δοκίμασε ξανά αργότερα."),
+            disable_notification=True,
+        )
+        return
+    await send_group_bot_link(update, context, role, ready=True)
+
+
+async def send_client_panel(context):
+    text = (
+        "🚕 <b>CYPRUS TAXI</b>\n\n"
+        "👉 Tap OPEN BOT below to open our private chat.\n"
+        "First time? Press START and enter your name and phone number.\n\n"
+        "To request a taxi, tap REQUEST A TAXI. The bot sends you a private message. "
+        "Open the bot and continue there: route → price → publish.\n\n"
+        "You can also write messages in this group."
+    )
+    markup = InlineKeyboardMarkup([
+        [button("👉 OPEN BOT", url=f"https://t.me/{BOT_USERNAME}", color="primary")],
+        [button("🚕 REQUEST A TAXI", callback_data="new_order:client")],
+    ])
+    with db() as conn:
+        saved = conn.execute("SELECT value FROM bot_settings WHERE key = 'client_panel'").fetchone()
+    message_id = int(saved["value"]) if saved else None
+    if message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=CLIENTS_GROUP_ID, message_id=message_id, text=text,
+                parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True,
+            )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                message_id = None
+    if not message_id:
+        message = await context.bot.send_message(
+            chat_id=CLIENTS_GROUP_ID, text=text, parse_mode="HTML", reply_markup=markup,
+            disable_notification=True, disable_web_page_preview=True,
+        )
+        message_id = message.message_id
+        with db() as conn:
+            conn.execute("""
+                INSERT INTO bot_settings(key, value) VALUES ('client_panel', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (str(message_id),))
+    with suppress(TelegramError):
+        await context.bot.pin_chat_message(chat_id=CLIENTS_GROUP_ID, message_id=message_id, disable_notification=True)
+    return message_id
+
+
 async def send_driver_panel(context):
     text = (
         "🚕 <b>ΔΙΑΔΡΟΜΕΣ ΟΔΗΓΩΝ</b>\n\n"
-        "<b>ΘΕΛΕΙΣ ΝΑ ΔΩΣΕΙΣ ΔΙΑΔΡΟΜΗ;</b>\n"
-        "Πάτησε το μπλε κουμπί παρακάτω.\n"
-        "1️⃣ Στείλε διαδρομή\n"
-        "2️⃣ Διάλεξε τιμή\n"
-        "3️⃣ Επιβεβαίωσε δημοσίευση\n\n"
-        "<b>ΘΕΛΕΙΣ ΝΑ ΠΑΡΕΙΣ ΔΙΑΔΡΟΜΗ;</b>\n"
-        "Πάτησε ✅ ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ "
-        "κάτω από τον αντίστοιχο αριθμό.\n\n"
-        "❌ ΔΕΝ ΕΝΔΙΑΦΕΡΟΜΑΙ: σταματά τις "
-        "προσωπικές υπενθυμίσεις μόνο για εσένα.\n\n"
-        "🔔 Για προσωπικές ειδοποιήσεις, "
-        "άνοιξε το bot και πάτησε START μόνο την πρώτη φορά."
+        "👉 Πάτησε ΑΝΟΙΞΕ ΤΟ BOT παρακάτω για να ανοίξεις την προσωπική συνομιλία.\n"
+        "Την πρώτη φορά πάτησε START και βάλε όνομα, τηλέφωνο, αριθμό και χρώμα αυτοκινήτου.\n\n"
+        "➕ Για να δώσεις διαδρομή, πάτησε ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ. "
+        "Το bot θα σου στείλει προσωπικό μήνυμα. Άνοιξέ το και συνέχισε εκεί: διαδρομή → τιμή → δημοσίευση.\n\n"
+        "✅ Για να πάρεις διαδρομή, πάτησε ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ κάτω από την αντίστοιχη διαδρομή.\n"
+        "❌ ΔΕΝ ΕΝΔΙΑΦΕΡΟΜΑΙ: σταματά τις ειδοποιήσεις για αυτή τη διαδρομή μόνο για εσένα.\n\n"
+        "💬 Μπορείτε να γράφετε κανονικά στην ομάδα."
     )
-
     markup = InlineKeyboardMarkup([
-        [
-            button(
-                "➕ ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ",
-                callback_data="new_order:driver",
-                color="primary",
-            )
-        ],
-        [
-            button(
-                "🔔 ΑΝΟΙΓΜΑ BOT / ΜΕΝΟΥ",
-                url=f"https://t.me/{BOT_USERNAME}",
-            )
-        ],
+        [button("👉 ΑΝΟΙΞΕ ΤΟ BOT", url=f"https://t.me/{BOT_USERNAME}", color="primary")],
+        [button("➕ ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ", callback_data="new_order:driver")],
     ])
 
     with db() as conn:
@@ -1990,10 +2060,9 @@ async def start(
         return
 
     if update.effective_chat.type != "private":
-        try:
-            await update.effective_message.delete()
-        except Exception:
-            pass
+        if update.effective_chat.id in (DRIVERS_GROUP_ID, CLIENTS_GROUP_ID):
+            role = "driver" if update.effective_chat.id == DRIVERS_GROUP_ID else "client"
+            await send_group_bot_link(update, context, role)
         return
 
     payload = ""
@@ -2057,84 +2126,26 @@ async def start(
     )
 
 
-async def panel_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.effective_chat:
         return
-
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
     if chat_id not in (DRIVERS_GROUP_ID, CLIENTS_GROUP_ID):
         return
-
-    if not await is_admin_in_chat(chat_id, user_id, context):
-        try:
-            await update.effective_message.delete()
-        except Exception:
-            pass
+    role = "driver" if chat_id == DRIVERS_GROUP_ID else "client"
+    if not await is_admin_in_chat(chat_id, update.effective_user.id, context):
+        await send_group_bot_link(update, context, role)
         return
-
-    try:
-        await update.effective_message.delete()
-    except Exception:
-        pass
-
-    if chat_id == DRIVERS_GROUP_ID:
+    if role == "driver":
         await send_driver_panel(context)
-
-        await context.bot.send_message(
-            chat_id=DRIVERS_GROUP_ID,
-            text="👇 Δώσε νέα διαδρομή από το κουμπί παρακάτω.",
-            reply_markup=driver_group_keyboard(),
-            disable_notification=True,
-        )
-        return
-
-    welcome_message = await context.bot.send_message(
-        chat_id=CLIENTS_GROUP_ID,
-        text=(
-            "🚕 <b>CYPRUS TAXI</b>\n\n"
-            "Need a taxi in Cyprus?\n\n"
-            "✈️ Airport transfers\n"
-            "🏙 City rides\n"
-            "🛣 Long-distance trips\n\n"
-            "👇 <b>Tap the button below to request a taxi.</b>\n\n"
-            "Your request will be sent privately "
-            "to available drivers."
-        ),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "🚕 REQUEST A TAXI",
-                callback_data="new_order:client",
-            )
-        ]]),
-        disable_notification=True,
-        disable_web_page_preview=True,
-    )
-
-    try:
-        await context.bot.pin_chat_message(
-            chat_id=CLIENTS_GROUP_ID,
-            message_id=welcome_message.message_id,
-            disable_notification=True,
-        )
-    except Exception:
-        logger.info("Could not pin client welcome message")
-
+        keyboard = driver_group_keyboard()
+        text = "👇 Για διαδρομές, άνοιξε το bot από το κουμπί στην καρφιτσωμένη ανακοίνωση."
+    else:
+        await send_client_panel(context)
+        keyboard = client_group_keyboard()
+        text = "👇 Open the bot using the button in the pinned message to request a taxi."
     await context.bot.send_message(
-        chat_id=CLIENTS_GROUP_ID,
-        text=(
-            "🚕 <b>REQUEST A TAXI</b>\n\n"
-            "You can also use the permanent button below."
-        ),
-        parse_mode="HTML",
-        reply_markup=client_group_keyboard(),
-        disable_notification=True,
-        disable_web_page_preview=True,
+        chat_id=chat_id, text=text, reply_markup=keyboard, disable_notification=True,
     )
 
 
@@ -2142,6 +2153,7 @@ async def version_command(update, context):
     if update.effective_chat and update.effective_chat.type == "private":
         await update.effective_message.reply_text(
             f"Версия бота: {BOT_VERSION}\n"
+            "Сообщения в группах не удаляются. В панелях есть кнопка открытия бота. "
             "Имена, телефоны и данные машин отображаются в группе."
         )
 
@@ -2157,23 +2169,19 @@ async def id_command(
 
 
 async def help_command(update, context):
-    if (
-        update.effective_chat
-        and update.effective_chat.type == "private"
-    ):
-        await start(update, context)
+    await start(update, context)
 
 
 async def new_command(update, context):
-    if (
-        update.effective_chat
-        and update.effective_chat.type == "private"
-    ):
-        await begin_new_order(
-            update,
-            context,
-            await role_for(update.effective_user.id, context),
-        )
+    if not update.effective_user or not update.effective_chat:
+        return
+    if update.effective_chat.type == "private":
+        await begin_new_order(update, context, await role_for(update.effective_user.id, context))
+    elif update.effective_chat.id in (DRIVERS_GROUP_ID, CLIENTS_GROUP_ID):
+        role = "driver" if update.effective_chat.id == DRIVERS_GROUP_ID else "client"
+        if role == "driver" and not await is_driver(update.effective_user.id, context):
+            return
+        await start_group_order(update, context, role)
 
 
 # ==================== ORDER LISTS ====================
@@ -2654,47 +2662,11 @@ async def callbacks(
             await query.answer("Μόνο για οδηγούς.", show_alert=True)
             return
 
-        # Acknowledge before sending the private prompt; never edit the
-        # shared group keyboard to reflect an individual user's state.
         await query.answer()
-        try:
+        if update.effective_chat and update.effective_chat.type != "private":
+            await start_group_order(update, context, role)
+        else:
             await begin_new_order(update, context, role)
-        except (Forbidden, BadRequest) as exc:
-            unavailable = isinstance(exc, Forbidden) or (
-                "chat not found" in str(exc).lower()
-            )
-            if not unavailable:
-                raise
-            user_state.pop(user.id, None)
-            english = role == "client"
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=(
-                    contact_identity(user.id, person_name(user), user.username)
-                    + (" — Open the bot and press START once. If blocked, unblock it first."
-                       if english else
-                       " — Άνοιξε το bot και πάτησε START μία φορά. Αν είναι μπλοκαρισμένο, ξεμπλόκαρέ το.")
-                ),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "🚕 OPEN BOT" if english else "🚕 ΑΝΟΙΓΜΑ BOT",
-                        url=f"https://t.me/{BOT_USERNAME}?start={role}",
-                    )
-                ]]),
-                disable_notification=True,
-            )
-            return
-        except TelegramError:
-            logger.exception("Could not send new order prompt to %s", user.id)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=("Cannot send the private prompt. Please try again later."
-                      if role == "client" else
-                      "Δεν μπορώ να στείλω προσωπικό μήνυμα. Δοκίμασε ξανά αργότερα."),
-                disable_notification=True,
-            )
-            return
         return
 
     if data.startswith("draft:"):
@@ -3251,117 +3223,25 @@ async def callbacks(
 
 # ==================== GROUP MESSAGES ====================
 
-async def driver_group_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def driver_group_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message:
         return
-
-    user = update.effective_user
     text = (update.message.text or "").strip()
-
-    if text in (
-        BTN_NEW_DRIVER,
-        OLD_NEW_DRIVER,
-        *LEGACY_DRIVER_BUTTONS,
-    ):
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-
-        if not await is_driver(user.id, context):
+    if text in (BTN_NEW_DRIVER, OLD_NEW_DRIVER, *LEGACY_DRIVER_BUTTONS):
+        if not await is_driver(update.effective_user.id, context):
             return
-
-        try:
-            await begin_new_order(update, context, "driver")
-
-        except Exception:
-            user_state.pop(user.id, None)
-            logger.exception(
-                "Could not start private driver flow"
-            )
-
-        return
-
-    if await is_admin_in_chat(
-        DRIVERS_GROUP_ID,
-        user.id,
-        context,
-    ):
-        return
-
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
+        await start_group_order(update, context, "driver")
+    # Leave all ordinary group messages untouched.
 
 
-async def client_group_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def client_group_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message:
         return
-
-    user = update.effective_user
-    text = (update.message.text or "").strip()
-
-    if text == BTN_NEW_CLIENT:
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-
-        try:
-            await begin_new_order(update, context, "client")
-
-        except Exception:
-            user_state.pop(user.id, None)
-            logger.info(
-                "Client must start bot privately first: %s",
-                user.id,
-            )
-
-        return
-
-    if await is_admin_in_chat(
-        CLIENTS_GROUP_ID,
-        user.id,
-        context,
-    ):
-        return
-
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
+    if (update.message.text or "").strip() == BTN_NEW_CLIENT:
+        await start_group_order(update, context, "client")
+    # Leave all ordinary group messages untouched.
 
 
-async def group_commands_cleanup(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    if not update.effective_chat or not update.effective_user:
-        return
-
-    chat_id = update.effective_chat.id
-
-    if chat_id not in (DRIVERS_GROUP_ID, CLIENTS_GROUP_ID):
-        return
-
-    if await is_admin_in_chat(
-        chat_id,
-        update.effective_user.id,
-        context,
-    ):
-        return
-
-    try:
-        await update.effective_message.delete()
-    except Exception:
-        pass
 
 
 async def error_handler(
@@ -3439,17 +3319,6 @@ def main():
             & filters.TEXT
             & ~filters.COMMAND,
             client_group_text,
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            (
-                filters.Chat(DRIVERS_GROUP_ID)
-                | filters.Chat(CLIENTS_GROUP_ID)
-            )
-            & filters.COMMAND,
-            group_commands_cleanup,
         )
     )
 
