@@ -15,6 +15,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     KeyboardButton,
 )
 from telegram.error import (
@@ -43,7 +44,7 @@ DRIVERS_GROUP_ID = -1004449292276
 CLIENTS_GROUP_ID = -1004401199110
 
 BOT_USERNAME = "CyprusDriversOrdersBot"
-BOT_VERSION = "GROUP-CHAT-3"
+BOT_VERSION = "SIMPLE-FLOW-4"
 DB_PATH = os.getenv("DB_PATH", "/data/orders.db")
 
 # Всего личных уведомлений, включая первое.
@@ -68,9 +69,9 @@ user_state = {}
 
 # ==================== BUTTONS ====================
 
-BTN_NEW_DRIVER = "➕ ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ"
-BTN_DRIVER_ORDERS = "📋 ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ"
-BTN_TAKEN = "📦 ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ"
+BTN_NEW_DRIVER = "➕ ΔΩΣΕ ΔΙΑΔΡΟΜΗ"
+BTN_DRIVER_ORDERS = "📋 ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΕΔΩΣΑ"
+BTN_TAKEN = "✅ ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ"
 BTN_CANCEL_DRIVER = "❌ ΑΚΥΡΩΣΗ"
 
 BTN_NEW_CLIENT = "🚕 REQUEST A TAXI"
@@ -78,6 +79,7 @@ BTN_CLIENT_ORDERS = "📋 MY ORDERS"
 BTN_CANCEL_CLIENT = "❌ CANCEL"
 
 LEGACY_DRIVER_BUTTONS = (
+    "➕ ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ",
     "🚕 ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ",
     "🚕 Δώσε διαδρομή",
 )
@@ -88,6 +90,13 @@ OLD_MY_ORDERS = "📋 MY ORDERS"
 OLD_TAKEN = "📦 MY TAKEN ORDER"
 OLD_TAKEN_ORDERS = "📦 MY TAKEN ORDERS"
 OLD_CANCEL = "❌ CANCEL"
+
+
+LEGACY_MENU_LABELS = {
+    "➕ ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ": BTN_NEW_DRIVER,
+    "📋 ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ": BTN_DRIVER_ORDERS,
+    "📦 ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ": BTN_TAKEN,
+}
 
 
 # ==================== DATABASE ====================
@@ -495,25 +504,8 @@ async def enforce_driver_access(
 # ==================== KEYBOARDS ====================
 
 def main_keyboard(role):
-    if role == "driver":
-        return ReplyKeyboardMarkup(
-            [
-                [BTN_NEW_DRIVER],
-                [BTN_DRIVER_ORDERS],
-                [BTN_TAKEN],
-            ],
-            resize_keyboard=True,
-            is_persistent=True,
-        )
-
-    return ReplyKeyboardMarkup(
-        [
-            [BTN_NEW_CLIENT],
-            [BTN_CLIENT_ORDERS],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
+    rows = [[BTN_NEW_DRIVER], [BTN_TAKEN], [BTN_DRIVER_ORDERS]] if role == "driver" else [[BTN_NEW_CLIENT], [BTN_CLIENT_ORDERS]]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
 def cancel_keyboard(role):
@@ -530,53 +522,14 @@ def cancel_keyboard(role):
     )
 
 
-def driver_group_keyboard():
-    return ReplyKeyboardMarkup(
-        [[BTN_NEW_DRIVER]],
-        resize_keyboard=True,
-        is_persistent=True,
-        selective=False,
-        input_field_placeholder="Νέα διαδρομή...",
-    )
 
 
-def client_group_keyboard():
-    return ReplyKeyboardMarkup(
-        [[BTN_NEW_CLIENT]],
-        resize_keyboard=True,
-        is_persistent=True,
-        selective=False,
-        input_field_placeholder="Request a taxi...",
-    )
 
 
 def open_order_keyboard(order_id):
-    order = get_order(order_id)
-    generation = order["alert_generation"] if order else 0
-
-    return InlineKeyboardMarkup([
-        [
-            button(
-                "✅ ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ",
-                callback_data=f"take:{order_id}",
-                color="success",
-            ),
-            button(
-                "❌ ΔΕΝ ΕΝΔΙΑΦΕΡΟΜΑΙ",
-                callback_data=(
-                    f"group_refuse:{order_id}:{generation}"
-                ),
-                color="danger",
-            ),
-        ],
-        [
-            button(
-                "➕ ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ",
-                callback_data="new_order:driver",
-                color="primary",
-            )
-        ],
-    ])
+    return InlineKeyboardMarkup([[
+        button("✅ ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ", callback_data=f"take:{order_id}", color="success")
+    ]])
 
 
 def management_rows(order, role):
@@ -1139,6 +1092,11 @@ async def start_alert_worker(application):
             await send_panel(application)
         except TelegramError:
             logger.exception("Could not update group panel; use /panel later")
+    for chat_id in (DRIVERS_GROUP_ID, CLIENTS_GROUP_ID):
+        try:
+            await clear_group_keyboard(application, chat_id)
+        except TelegramError:
+            logger.exception("Could not clear old group keyboard")
     with db() as conn:
         orders = conn.execute("""
             SELECT id FROM orders
@@ -1343,14 +1301,14 @@ def profile_complete(user_id, role):
 def profile_prompt(action, role):
     if role == "client":
         return {
-            "profile_name": "👤 What is your name? (2–100 characters)",
-            "profile_phone": "📞 Share your phone using the button or enter it with country code, e.g. +35799123456.",
+            "profile_name": "👤 What is your name?",
+            "profile_phone": "📞 Tap SHARE MY PHONE below, or type your number with country code, e.g. +35799123456.",
         }[action]
     return {
-        "profile_name": "👤 Πώς σε λένε; (2–100 χαρακτήρες)",
-        "profile_phone": "📞 Στείλε το τηλέφωνό σου με το κουμπί ή γράψε το με κωδικό χώρας, π.χ. +35799123456.",
-        "profile_plate": "🚘 Ποιος είναι ο αριθμός κυκλοφορίας; (2–20 χαρακτήρες)",
-        "profile_color": "🎨 Τι χρώμα είναι το αυτοκίνητο; (2–40 χαρακτήρες)",
+        "profile_name": "👤 Πώς σε λένε; Γράψε το όνομά σου.",
+        "profile_phone": "📞 Πάτησε ΤΟ ΤΗΛΕΦΩΝΟ ΜΟΥ παρακάτω ή γράψε τον αριθμό σου με κωδικό χώρας, π.χ. +35799123456.",
+        "profile_plate": "🚘 Γράψε τον αριθμό κυκλοφορίας του αυτοκινήτου σου.",
+        "profile_color": "🎨 Τι χρώμα είναι το αυτοκίνητό σου;",
     }[action]
 
 
@@ -1397,7 +1355,7 @@ async def profile_text(update, context, state):
     reserved = {
         BTN_NEW_DRIVER, BTN_NEW_CLIENT, BTN_DRIVER_ORDERS, BTN_CLIENT_ORDERS,
         BTN_TAKEN, OLD_NEW_DRIVER, OLD_MY_ORDER, OLD_MY_ORDERS,
-        OLD_TAKEN, OLD_TAKEN_ORDERS, *LEGACY_DRIVER_BUTTONS,
+        OLD_TAKEN, OLD_TAKEN_ORDERS, *LEGACY_DRIVER_BUTTONS, *LEGACY_MENU_LABELS,
     }
     if action == "profile_phone":
         text = text.strip()
@@ -1487,26 +1445,16 @@ async def begin_new_order(update, context, role):
 
     if role == "client":
         text = (
-            "🚕 <b>STEP 1/3 — ROUTE</b>\n\n"
-            "Send in one message:\n"
-            "📍 Pickup → destination\n"
-            "🕒 Date and time\n"
-            "👥 Passengers\n\n"
-            "Example: Larnaca Airport → Limassol, "
-            "today 18:30, 2 passengers.\n\n"
-            "Next: choose the price."
+            "🚕 <b>1/3 — ROUTE</b>\n\n"
+            "Send pickup → destination, date, time and passengers in one message.\n\n"
+            "Example: Larnaca Airport → Limassol, today 18:30, 2 people."
         )
     else:
         text = (
-            "🚕 <b>ΒΗΜΑ 1/3 — ΔΙΑΔΡΟΜΗ</b>\n\n"
-            "Στείλε σε ένα μήνυμα:\n"
-            "📍 Από πού → πού\n"
-            "🕒 Ημερομηνία και ώρα\n"
-            "👥 Επιβάτες\n\n"
-            "Παράδειγμα: Αεροδρόμιο Λάρνακας → Λεμεσός, "
-            "σήμερα 18:30, 2 άτομα.\n\n"
-            "Μπορείς να στείλεις και 🎤 φωνητικό.\n"
-            "Μετά θα επιλέξεις την τιμή."
+            "🚕 <b>1/3 — ΔΙΑΔΡΟΜΗ</b>\n\n"
+            "Γράψε από πού → πού, μέρα, ώρα και πόσα άτομα.\n"
+            "Μπορείς να στείλεις και φωνητικό.\n\n"
+            "Παράδειγμα: Αεροδρόμιο Λάρνακας → Λεμεσός, σήμερα 18:30, 2 άτομα."
         )
 
     await context.bot.send_message(
@@ -1901,7 +1849,7 @@ async def send_group_bot_link(update, context, role, *, needs_start=False, ready
         message = (
             "Tap OPEN BOT below. Register your details there and use REQUEST A TAXI."
             if english else
-            "Πάτησε ΑΝΟΙΞΕ ΤΟ BOT παρακάτω. Εκεί βάζεις τα στοιχεία σου και πατάς ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ."
+            "Πάτησε ΑΝΟΙΞΕ ΤΟ BOT παρακάτω. Εκεί βάζεις τα στοιχεία σου και πατάς ΔΩΣΕ ΔΙΑΔΡΟΜΗ."
         )
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -1937,19 +1885,38 @@ async def start_group_order(update, context, role):
     await send_group_bot_link(update, context, role, ready=True)
 
 
+async def clear_group_keyboard(context, chat_id, force=False):
+    key = f"simple_flow_keyboard:{chat_id}"
+    with db() as conn:
+        saved = conn.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
+    if saved and not force:
+        return
+    text = (
+        "🚕 Για να δώσεις διαδρομή, άνοιξε το bot από το κουμπί στην καρφιτσωμένη ανακοίνωση."
+        if chat_id == DRIVERS_GROUP_ID else
+        "🚕 To request a taxi, open the bot using the button in the pinned message."
+    )
+    await context.bot.send_message(
+        chat_id=chat_id, text=text, reply_markup=ReplyKeyboardRemove(), disable_notification=True,
+    )
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO bot_settings(key, value) VALUES (?, 'done')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (key,))
+
+
 async def send_client_panel(context):
     text = (
         "🚕 <b>CYPRUS TAXI</b>\n\n"
-        "👉 Tap OPEN BOT below to open our private chat.\n"
-        "First time? Press START and enter your name and phone number.\n\n"
-        "To request a taxi, tap REQUEST A TAXI. The bot sends you a private message. "
-        "Open the bot and continue there: route → price → publish.\n\n"
+        "Need a taxi? Tap OPEN BOT below.\n"
+        "In the private chat, tap REQUEST A TAXI and follow the questions.\n\n"
         "You can also write messages in this group."
     )
-    markup = InlineKeyboardMarkup([
-        [button("👉 OPEN BOT", url=f"https://t.me/{BOT_USERNAME}", color="primary")],
-        [button("🚕 REQUEST A TAXI", callback_data="new_order:client")],
-    ])
+    markup = InlineKeyboardMarkup([[
+        button("🚕 OPEN BOT", url=f"https://t.me/{BOT_USERNAME}", color="primary")
+    ]])
+
     with db() as conn:
         saved = conn.execute("SELECT value FROM bot_settings WHERE key = 'client_panel'").fetchone()
     message_id = int(saved["value"]) if saved else None
@@ -1980,19 +1947,15 @@ async def send_client_panel(context):
 
 async def send_driver_panel(context):
     text = (
-        "🚕 <b>ΔΙΑΔΡΟΜΕΣ ΟΔΗΓΩΝ</b>\n\n"
-        "👉 Πάτησε ΑΝΟΙΞΕ ΤΟ BOT παρακάτω για να ανοίξεις την προσωπική συνομιλία.\n"
-        "Την πρώτη φορά πάτησε START και βάλε όνομα, τηλέφωνο, αριθμό και χρώμα αυτοκινήτου.\n\n"
-        "➕ Για να δώσεις διαδρομή, πάτησε ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ. "
-        "Το bot θα σου στείλει προσωπικό μήνυμα. Άνοιξέ το και συνέχισε εκεί: διαδρομή → τιμή → δημοσίευση.\n\n"
-        "✅ Για να πάρεις διαδρομή, πάτησε ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ κάτω από την αντίστοιχη διαδρομή.\n"
-        "❌ ΔΕΝ ΕΝΔΙΑΦΕΡΟΜΑΙ: σταματά τις ειδοποιήσεις για αυτή τη διαδρομή μόνο για εσένα.\n\n"
-        "💬 Μπορείτε να γράφετε κανονικά στην ομάδα."
+        "🚕 <b>ΔΙΑΔΡΟΜΕΣ</b>\n\n"
+        "Για να δώσεις διαδρομή, πάτησε το κουμπί παρακάτω.\n"
+        "Το bot θα ανοίξει προσωπικά. Εκεί γράφεις τη διαδρομή και την τιμή.\n\n"
+        "Για να πάρεις μια διαδρομή, πάτησε ✅ ΠΑΡΕ ΤΗ ΔΙΑΔΡΟΜΗ κάτω από τη διαδρομή στην ομάδα.\n\n"
+        "💬 Στην ομάδα μπορείτε να γράφετε κανονικά."
     )
-    markup = InlineKeyboardMarkup([
-        [button("👉 ΑΝΟΙΞΕ ΤΟ BOT", url=f"https://t.me/{BOT_USERNAME}", color="primary")],
-        [button("➕ ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ", callback_data="new_order:driver")],
-    ])
+    markup = InlineKeyboardMarkup([[
+        button("🚕 ΑΝΟΙΞΕ ΤΟ BOT", url=f"https://t.me/{BOT_USERNAME}", color="primary")
+    ]])
 
     with db() as conn:
         saved = conn.execute(
@@ -2095,26 +2058,18 @@ async def start(
 
     if role == "driver":
         text = (
-            "🚕 <b>ΜΕΝΟΥ ΟΔΗΓΟΥ</b>\n\n"
-            "➕ <b>ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ</b>: "
-            "στείλε διαδρομή → διάλεξε τιμή → επιβεβαίωσε.\n\n"
-            "📋 <b>ΟΙ ΔΙΑΔΡΟΜΕΣ ΜΟΥ</b>: "
-            "διαδρομές που δημοσίευσες.\n"
-            "📦 <b>ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ</b>: "
-            "διαδρομές που αποδέχτηκες.\n\n"
-            "🔔 Οι προσωπικές ειδοποιήσεις ενεργοποιήθηκαν: "
-            "έως 6 ανά διαδρομή.\n"
-            "✅ Πάρε τη διαδρομή ή ❌ Δεν ενδιαφέρομαι "
-            "για να σταματήσουν οι υπενθυμίσεις.\n\n"
-            "👤 Αλλαγή ονόματος και αυτοκινήτου: /profile\n\n"
-            "👇 Διάλεξε κουμπί παρακάτω."
+            "🚕 <b>Τι θέλεις να κάνεις;</b>\n\n"
+            "➕ ΔΩΣΕ ΔΙΑΔΡΟΜΗ — γράψε μια νέα διαδρομή.\n"
+            "✅ ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΠΗΡΑ — δες τις διαδρομές που ανέλαβες.\n"
+            "📋 ΔΙΑΔΡΟΜΕΣ ΠΟΥ ΕΔΩΣΑ — δες τις διαδρομές που έστειλες.\n\n"
+            "Αλλαγή προσωπικών στοιχείων: /profile"
         )
     else:
         text = (
-            "🚕 <b>CYPRUS TAXI</b>\n\n"
-            "Tap REQUEST A TAXI. "
-            "Send the route → choose the price → "
-            "confirm publication."
+            "🚕 <b>Need a taxi?</b>\n\n"
+            "Tap REQUEST A TAXI and follow the questions.\n"
+            "Tap MY ORDERS to see your requests.\n\n"
+            "Update your details: /profile"
         )
 
     await update.message.reply_text(
@@ -2138,22 +2093,16 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if role == "driver":
         await send_driver_panel(context)
-        keyboard = driver_group_keyboard()
-        text = "👇 Για διαδρομές, άνοιξε το bot από το κουμπί στην καρφιτσωμένη ανακοίνωση."
     else:
         await send_client_panel(context)
-        keyboard = client_group_keyboard()
-        text = "👇 Open the bot using the button in the pinned message to request a taxi."
-    await context.bot.send_message(
-        chat_id=chat_id, text=text, reply_markup=keyboard, disable_notification=True,
-    )
+    await clear_group_keyboard(context, chat_id, force=True)
 
 
 async def version_command(update, context):
     if update.effective_chat and update.effective_chat.type == "private":
         await update.effective_message.reply_text(
             f"Версия бота: {BOT_VERSION}\n"
-            "Сообщения в группах не удаляются. В панелях есть кнопка открытия бота. "
+            "Упрощённый режим: одна кнопка открытия бота в группах, три кнопки в меню водителя. "
             "Имена, телефоны и данные машин отображаются в группе."
         )
 
@@ -2356,6 +2305,7 @@ async def private_text(
 
     user = update.effective_user
     text = (update.message.text or "").strip()
+    text = LEGACY_MENU_LABELS.get(text, text)
     state = user_state.get(user.id)
 
     if state and state.get("role"):
@@ -2631,7 +2581,7 @@ async def private_voice(
         or state.get("role") != "driver"
     ):
         await update.message.reply_text(
-            "Πάτησε πρώτα ➕ ΔΩΣΕ ΝΕΑ ΔΙΑΔΡΟΜΗ.",
+            "Πάτησε πρώτα ➕ ΔΩΣΕ ΔΙΑΔΡΟΜΗ.",
             reply_markup=main_keyboard("driver"),
         )
         return
